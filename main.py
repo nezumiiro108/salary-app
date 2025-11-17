@@ -1,8 +1,9 @@
 import streamlit as st
 import datetime
 import math
-import sqlite3
 import calendar
+import pandas as pd
+from streamlit_gsheets import GSheetsConnection
 
 # --- 1. ページ設定 ---
 st.set_page_config(page_title="給料帳", layout="centered")
@@ -10,181 +11,134 @@ st.set_page_config(page_title="給料帳", layout="centered")
 # --- 2. デザイン (ダークモード & コンパクト & シンプル) ---
 st.markdown("""
     <style>
-    /* 全体の背景をダークに固定 */
-    .stApp {
-        background-color: #0e1117;
-        color: #fafafa;
-    }
-    
-    /* コンテンツ余白 */
-    .block-container {
-        padding-top: 2rem;
-        padding-bottom: 4rem;
-        max-width: 600px;
-    }
-
-    /* --- カレンダー (CSS Grid) --- */
-    .calendar-grid {
-        display: grid;
-        grid-template-columns: repeat(7, 1fr);
-        gap: 3px;
-        margin-top: 5px;
-    }
-    
-    /* 曜日ヘッダー */
-    .cal-header {
-        text-align: center;
-        font-size: 10px;
-        font-weight: bold;
-        color: #aaa;
-        padding-bottom: 2px;
-    }
-
-    /* 日付マス (ダーク) */
-    .cal-day {
-        background-color: #262730;
-        border: 1px solid #333;
-        border-radius: 4px;
-        height: 50px;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-    }
+    .stApp { background-color: #0e1117; color: #fafafa; }
+    .block-container { padding-top: 2rem; padding-bottom: 4rem; max-width: 600px; }
+    .calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; margin-top: 5px; }
+    .cal-header { text-align: center; font-size: 10px; font-weight: bold; color: #aaa; padding-bottom: 2px; }
+    .cal-day { background-color: #262730; border: 1px solid #333; border-radius: 4px; height: 50px; display: flex; flex-direction: column; align-items: center; justify-content: center; }
     .cal-num { font-size: 10px; color: #ccc; margin: 0; line-height: 1.2; }
-    .cal-pay { 
-        font-size: 8.5px; 
-        font-weight: bold; 
-        color: #4da6ff; 
-        line-height: 1.2; 
-        white-space: nowrap; 
-        overflow: hidden;
-        text-overflow: ellipsis;
-        max-width: 100%;
-        padding: 0 2px;
-    }
+    .cal-pay { font-size: 8.5px; font-weight: bold; color: #4da6ff; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; padding: 0 2px; }
     .cal-today { border: 1px solid #4da6ff; background-color: #1e2a3a; }
     .cal-empty { background-color: transparent; border: none; }
-
-    /* --- 合計表示エリア --- */
-    .total-area {
-        text-align: center;
-        padding: 10px;
-        background-color: #262730;
-        border-radius: 8px;
-        border: 1px solid #444;
-        color: #fff;
-        margin-bottom: 15px;
-    }
+    .total-area { text-align: center; padding: 10px; background-color: #262730; border-radius: 8px; border: 1px solid #444; color: #fff; margin-bottom: 15px; }
     .total-amount { font-size: 22px; font-weight: bold; color: #4da6ff; }
     .total-sub { font-size: 10px; color: #aaa; }
-
-    /* --- 履歴リスト --- */
-    .history-row {
-        border-bottom: 1px solid #333;
-        padding: 8px 0;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        color: #eee;
-    }
+    .history-row { border-bottom: 1px solid #333; padding: 8px 0; display: flex; justify-content: space-between; align-items: center; color: #eee; }
     .tag { font-size: 10px; padding: 2px 6px; border-radius: 4px; margin-right: 5px; font-weight: normal; }
     .tag-work { background: #1c3a5e; color: #aaddff; }
     .tag-break { background: #4a1a1a; color: #ffaaaa; }
     .tag-drive { background: #1a4a3a; color: #aaffdd; }
-    
-    /* スライダー調整 */
     .stSlider { padding-bottom: 10px !important; }
     .stSlider label { font-size: 12px; color: #ddd !important; }
     </style>
 """, unsafe_allow_html=True)
 
-# --- 3. データベース管理 ---
-DB_PATH = "salary_data.db"
+# --- 3. Google Sheets 接続 ---
+conn = st.connection("gsheets", type=GSheetsConnection)
 
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS records (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date_str TEXT, type TEXT,
-            start_h INTEGER, start_m INTEGER,
-            end_h INTEGER, end_m INTEGER,
-            distance_km REAL, manual_pay INTEGER
-        )
-    ''')
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY, value TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
+# データ取得・保存関数
+def get_all_records_df():
+    """recordsシートから全データをDataFrameとして取得"""
+    try:
+        df = conn.read(worksheet="records", ttl=0)
+        # カラムの型変換（エラー防止）
+        df = df.fillna(0)
+        df['id'] = pd.to_numeric(df['id'], errors='coerce').fillna(0).astype(int)
+        df['date_str'] = df['date_str'].astype(str)
+        return df
+    except Exception:
+        # シートが空などの場合、空のDFを返す
+        return pd.DataFrame(columns=['id', 'date_str', 'type', 'start_h', 'start_m', 'end_h', 'end_m', 'distance_km', 'pay_amount', 'duration_minutes'])
 
-def add_record(date_str, r_type, sh, sm, eh, em, dist, pay=0):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''INSERT INTO records (date_str, type, start_h, start_m, end_h, end_m, distance_km, manual_pay) VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', (date_str, r_type, sh, sm, eh, em, dist, pay))
-    conn.commit()
-    conn.close()
+def save_record_to_sheet(new_record_dict):
+    """新しいレコードを追記"""
+    df = get_all_records_df()
+    
+    # 新しいIDの発番
+    new_id = 1
+    if not df.empty and 'id' in df.columns:
+        if df['id'].max() > 0:
+            new_id = df['id'].max() + 1
+    
+    new_record_dict['id'] = new_id
+    
+    # 新しい行を作成して結合
+    new_row = pd.DataFrame([new_record_dict])
+    updated_df = pd.concat([df, new_row], ignore_index=True)
+    
+    # 保存
+    conn.update(worksheet="records", data=updated_df)
+    st.cache_data.clear() # キャッシュクリア
 
-def delete_record_by_id(record_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('DELETE FROM records WHERE id = ?', (record_id,))
-    conn.commit()
-    conn.close()
+def delete_record_from_sheet(record_id):
+    """指定IDのレコードを削除"""
+    df = get_all_records_df()
+    if not df.empty:
+        updated_df = df[df['id'] != record_id]
+        conn.update(worksheet="records", data=updated_df)
+        st.cache_data.clear()
 
 def get_records_by_date(date_str):
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    c = conn.cursor()
-    c.execute('SELECT * FROM records WHERE date_str = ? ORDER BY start_h, start_m', (date_str,))
-    rows = c.fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
-
-def get_all_records():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    c = conn.cursor()
-    c.execute('SELECT * FROM records')
-    rows = c.fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+    """特定の日付のデータを辞書リストで返す"""
+    df = get_all_records_df()
+    if df.empty: return []
+    
+    # 日付でフィルタリング
+    filtered = df[df['date_str'] == date_str].copy()
+    # 辞書リストに変換
+    return filtered.to_dict('records')
 
 def get_min_record_date():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT MIN(date_str) FROM records')
-    row = c.fetchone()
-    conn.close()
-    if row and row[0]:
-        return datetime.datetime.strptime(row[0], '%Y-%m-%d').date()
-    return datetime.date.today()
+    """一番古い日付を取得"""
+    df = get_all_records_df()
+    if df.empty: return datetime.date.today()
+    
+    try:
+        min_date_str = df['date_str'].min()
+        return datetime.datetime.strptime(min_date_str, '%Y-%m-%d').date()
+    except:
+        return datetime.date.today()
+
+# 設定の読み書き (settingsシートを使用)
+def load_setting(key, default_value):
+    try:
+        df = conn.read(worksheet="settings", ttl=0)
+        if df.empty: return default_value
+        
+        # key列から検索
+        row = df[df['key'] == key]
+        if not row.empty:
+            return row.iloc[0]['value']
+        return default_value
+    except:
+        return default_value
 
 def save_setting(key, value):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', (key, str(value)))
-    conn.commit()
-    conn.close()
-
-def load_setting(key, default_value):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT value FROM settings WHERE key = ?', (key,))
-    row = c.fetchone()
-    conn.close()
-    return row[0] if row else default_value
-
-init_db()
+    try:
+        df = conn.read(worksheet="settings", ttl=0)
+    except:
+        df = pd.DataFrame(columns=['key', 'value'])
+        
+    # 既存のキーがあれば更新、なければ追加
+    if key in df['key'].values:
+        df.loc[df['key'] == key, 'value'] = str(value)
+    else:
+        new_row = pd.DataFrame([{'key': key, 'value': str(value)}])
+        df = pd.concat([df, new_row], ignore_index=True)
+        
+    conn.update(worksheet="settings", data=df)
+    st.cache_data.clear()
 
 # --- 4. 計算ロジック ---
 NIGHT_START = 22 * 60
 NIGHT_END = 28 * 60
 OVERTIME_THRESHOLD = 8 * 60
+
+def calculate_driving_allowance(km):
+    if km < 0.1: return 0
+    if km < 10: return 150
+    if km >= 340: return 3300
+    return 300 + (math.floor((km - 10) / 30) * 300)
 
 def calculate_daily_total(records, base_wage):
     work_minutes = set()
@@ -192,19 +146,17 @@ def calculate_daily_total(records, base_wage):
     drive_pay_total = 0
     
     for r in records:
+        # DataFrameから来るデータはfloatの可能性があるためint変換
+        sh, sm = int(r['start_h']), int(r['start_m'])
+        eh, em = int(r['end_h']), int(r['end_m'])
+        
         if r['type'] == 'DRIVE':
-            drive_pay_total += calculate_driving_allowance(r['distance_km'])
-            s = r['start_h'] * 60 + r['start_m']
-            e = r['end_h'] * 60 + r['end_m']
-            for m in range(s, e): work_minutes.add(m)
+            drive_pay_total += calculate_driving_allowance(float(r['distance_km']))
+            for m in range(sh*60 + sm, eh*60 + em): work_minutes.add(m)
         elif r['type'] == 'WORK':
-            s = r['start_h'] * 60 + r['start_m']
-            e = r['end_h'] * 60 + r['end_m']
-            for m in range(s, e): work_minutes.add(m)
+            for m in range(sh*60 + sm, eh*60 + em): work_minutes.add(m)
         elif r['type'] == 'BREAK':
-            s = r['start_h'] * 60 + r['start_m']
-            e = r['end_h'] * 60 + r['end_m']
-            for m in range(s, e): break_minutes.add(m)
+            for m in range(sh*60 + sm, eh*60 + em): break_minutes.add(m)
     
     actual_work = sorted(list(work_minutes - break_minutes))
     total_min = len(actual_work)
@@ -222,12 +174,6 @@ def calculate_daily_total(records, base_wage):
         
     return math.floor(total_work_pay) + drive_pay_total, total_min
 
-def calculate_driving_allowance(km):
-    if km < 0.1: return 0
-    if km < 10: return 150
-    if km >= 340: return 3300
-    return 300 + (math.floor((km - 10) / 30) * 300)
-
 def format_time_label(h, m):
     prefix = "翌" if h >= 24 else ""
     disp_h = h - 24 if h >= 24 else h
@@ -235,7 +181,12 @@ def format_time_label(h, m):
 
 # --- 5. セッション ---
 if 'base_wage' not in st.session_state:
-    st.session_state.base_wage = int(load_setting('base_wage', '1190'))
+    # 読み込み失敗時は初期値1190
+    try:
+        loaded = load_setting('base_wage', '1190')
+        st.session_state.base_wage = int(float(loaded))
+    except:
+        st.session_state.base_wage = 1190
 
 today = datetime.date.today()
 if 'view_year' not in st.session_state: st.session_state.view_year = today.year
@@ -250,17 +201,20 @@ def change_month(amount):
     st.session_state.view_year = y
 
 def get_calendar_summary(wage):
-    all_r = get_all_records()
-    grouped = {}
-    for r in all_r:
-        d = r['date_str']
-        if d not in grouped: grouped[d] = []
-        grouped[d].append(r)
+    df = get_all_records_df()
+    if df.empty: return {}
     
+    # 日付ごとにグループ化
     summary = {}
-    for d, recs in grouped.items():
-        pay, mins = calculate_daily_total(recs, wage)
+    # date_strでユニークな日付を取得
+    unique_dates = df['date_str'].unique()
+    
+    for d in unique_dates:
+        day_df = df[df['date_str'] == d]
+        records = day_df.to_dict('records')
+        pay, mins = calculate_daily_total(records, wage)
         summary[d] = {'pay': pay, 'min': mins}
+        
     return summary
 
 # --- 6. メイン表示 ---
@@ -273,7 +227,7 @@ with tab_setting:
     st.write("")
     st.subheader("設定")
     new_wage = st.number_input("基本時給 (円)", value=st.session_state.base_wage, step=10)
-    if new_wage != st.session_state.base_wage:
+    if st.button("保存"):
         st.session_state.base_wage = new_wage
         save_setting('base_wage', new_wage)
         st.success("保存しました")
@@ -294,6 +248,7 @@ with tab_setting:
 with tab_input:
     st.write("")
     
+    # 入力日付
     input_date = st.date_input("日付", value=datetime.date.today())
     input_date_str = input_date.strftime("%Y-%m-%d")
     
@@ -315,20 +270,14 @@ with tab_input:
     dist_km = 0
     if "運転" in record_type:
         st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
-        
-        # 現在のシークバーの値を取得
         curr_km = st.session_state.get('d_km', 0.0)
-        # リアルタイムで手当を計算
         curr_allowance = calculate_driving_allowance(curr_km)
-        
-        # 距離と手当を横並びで表示
         st.markdown(f"""
             <div style='display:flex; justify-content:space-between; align-items:end; margin-bottom:2px;'>
                 <div style='font-size:11px; font-weight:bold; color:#55bb88;'>距離: {curr_km} km</div>
                 <div style='font-size:11px; font-weight:bold; color:#55bb88;'>手当: ¥{curr_allowance:,}</div>
             </div>
         """, unsafe_allow_html=True)
-        
         dist_km = st.slider("km", 0.0, 350.0, 0.0, 0.1, key="d_km", label_visibility="collapsed")
     
     st.markdown("<div style='height:15px'></div>", unsafe_allow_html=True)
@@ -340,9 +289,22 @@ with tab_input:
             st.error("距離を入力してください")
         else:
             r_code = "DRIVE" if "運転" in record_type else "BREAK" if "休憩" in record_type else "WORK"
-            add_record(input_date_str, r_code, sh, sm, eh, em, dist_km)
+            
+            # データ作成 (辞書型)
+            new_data = {
+                "date_str": input_date_str,
+                "type": r_code,
+                "start_h": sh, "start_m": sm,
+                "end_h": eh, "end_m": em,
+                "distance_km": dist_km,
+                "pay_amount": 0, # 計算は表示時に行うので0で保存
+                "duration_minutes": (eh*60+em) - (sh*60+sm)
+            }
+            
+            save_record_to_sheet(new_data)
             st.rerun()
             
+    # 履歴
     st.markdown("<div style='font-size:12px; font-weight:bold; color:#888; margin-top:20px; margin-bottom:5px;'>登録済みリスト</div>", unsafe_allow_html=True)
     
     day_recs = get_records_by_date(input_date_str)
@@ -354,7 +316,11 @@ with tab_input:
         for r in day_recs:
             c1, c2 = st.columns([5, 1])
             with c1:
-                time_str = f"{format_time_label(r['start_h'], r['start_m'])} ~ {format_time_label(r['end_h'], r['end_m'])}"
+                # int変換
+                s_h, s_m = int(r['start_h']), int(r['start_m'])
+                e_h, e_m = int(r['end_h']), int(r['end_m'])
+                
+                time_str = f"{format_time_label(s_h, s_m)} ~ {format_time_label(e_h, e_m)}"
                 if r['type'] == "DRIVE":
                     html = f"<div class='history-row'><div><span class='tag tag-drive'>運転</span> <span style='font-size:12px;'>{time_str} ({r['distance_km']}km)</span></div></div>"
                 elif r['type'] == "BREAK":
@@ -365,7 +331,7 @@ with tab_input:
             with c2:
                 st.write("") 
                 if st.button("✕", key=f"del_{r['id']}"):
-                    delete_record_by_id(r['id'])
+                    delete_record_from_sheet(r['id'])
                     st.rerun()
         
         st.markdown(f"""
@@ -376,7 +342,7 @@ with tab_input:
         """, unsafe_allow_html=True)
 
 # ==========================================
-# TAB: カレンダー (Grid Layout)
+# TAB: カレンダー
 # ==========================================
 with tab_calendar:
     
@@ -440,7 +406,10 @@ with tab_calendar:
             else:
                 curr_d = datetime.date(st.session_state.view_year, st.session_state.view_month, day)
                 d_str = curr_d.strftime("%Y-%m-%d")
-                pay_val = summary.get(d_str, {'pay': 0})['pay']
+                
+                pay_val = 0
+                if d_str in summary:
+                    pay_val = summary[d_str]['pay']
                 
                 extra_cls = "cal-today" if curr_d == today_d else ""
                 pay_disp = f"¥{pay_val:,}" if pay_val > 0 else ""
