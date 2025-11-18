@@ -125,14 +125,18 @@ NIGHT_START = 22 * 60
 NIGHT_END = 28 * 60
 OVERTIME_THRESHOLD = 8 * 60
 
+# 通常の運転手当 (1km単位)
 def calculate_driving_allowance(km):
-    if km < 0.1: return 0
+    km = int(km) # 念のため整数化
+    if km == 0: return 0
     if km < 10: return 150
     if km >= 340: return 3300
+    # 10km以上: 300円スタート + 30kmごとに300円
     return 300 + (math.floor((km - 10) / 30) * 300)
 
+# 直行直帰 (1kmにつき25円)
 def calculate_direct_drive_pay(km):
-    return math.floor(km) * 25
+    return int(km) * 25
 
 def calculate_daily_total(records, base_wage):
     work_minutes = set()
@@ -303,16 +307,16 @@ with tab_input:
         sh, sm = time_sliders("開始", "sh_in", "sm_in", 9, 0)
         eh, em = time_sliders("終了", "eh_in", "em_in", 18, 0)
         
-        dist_km = 0.0
+        dist_km = 0 # int
         is_direct = False
         
         if "運転" in record_type:
             st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
             
-            # 直行直帰スイッチ (絵文字削除)
             is_direct = st.toggle("直行直帰 (時給なし・25円/km)", value=False)
             
-            curr_km = st.session_state.get('d_km', 0.0)
+            # session_stateから取得（なければ0）
+            curr_km = int(st.session_state.get('d_km', 0))
             
             if is_direct:
                 curr_allowance = calculate_direct_drive_pay(curr_km)
@@ -331,7 +335,8 @@ with tab_input:
                     </div>
                 """, unsafe_allow_html=True)
                 
-            dist_km = st.slider("km", 0.0, 350.0, 0.0, 0.1, key="d_km", label_visibility="collapsed")
+            # 1km単位の整数スライダー
+            dist_km = st.slider("km", 0, 350, 0, 1, key="d_km", label_visibility="collapsed")
         
         st.markdown("<div style='height:15px'></div>", unsafe_allow_html=True)
         
@@ -384,12 +389,13 @@ with tab_input:
                     time_str = f"{format_time_label(s_h, s_m)} ~ {format_time_label(e_h, e_m)}"
                     
                     if r['type'] == "DRIVE_DIRECT":
-                        dist = float(r['distance_km'])
+                        # 整数化
+                        dist = int(float(r['distance_km']))
                         pay = calculate_direct_drive_pay(dist)
                         tag_cls, tag_txt = "tag-direct", "直行直帰"
                         info_txt = f"{time_str} <span style='color:#ffddaa; font-size:10px;'>({dist}km/¥{pay:,})</span>"
                     elif r['type'] == "DRIVE":
-                        dist = float(r['distance_km'])
+                        dist = int(float(r['distance_km']))
                         pay = calculate_driving_allowance(dist)
                         tag_cls, tag_txt = "tag-drive", "運転"
                         info_txt = f"{time_str} <span style='color:#aaffdd; font-size:10px;'>({dist}km/¥{pay:,})</span>"
