@@ -122,63 +122,90 @@ def save_setting(key, value):
 
 # --- 4. 計算ロジック ---
 NIGHT_START = 22 * 60
-NIGHT_END = 28 * 60
+NIGHT_END = 27 * 60  # 27:00 (03:00)
 OVERTIME_THRESHOLD = 8 * 60
 
 # 通常の運転手当 (1km単位)
 def calculate_driving_allowance(km):
-    km = int(km) # 念のため整数化
+    km = int(km)
     if km == 0: return 0
     if km < 10: return 150
     if km >= 340: return 3300
-    # 10km以上: 300円スタート + 30kmごとに300円
     return 300 + (math.floor((km - 10) / 30) * 300)
 
 # 直行直帰 (1kmにつき25円)
 def calculate_direct_drive_pay(km):
     return int(km) * 25
 
-def calculate_daily_total(records, base_wage):
-    work_minutes = set()
-    break_minutes = set()
-    drive_pay_total = 0
-    other_pay_total = 0
+def calculate_daily_total(records, base_wage, drive_wage):
+    # 1. 分ごとの時給マップを作成 (minute -> wage_per_minute)
+    # 重複した場合は後勝ちになるが、運用でカバー
+    minute_wage_map = {}
+    
+    fixed_pay_total = 0 # 距離手当やその他
     
     for r in records:
         sh, sm = int(r['start_h']), int(r['start_m'])
         eh, em = int(r['end_h']), int(r['end_m'])
         
         if r['type'] == 'OTHER':
-            other_pay_total += int(r['pay_amount'])
+            fixed_pay_total += int(r['pay_amount'])
         
         elif r['type'] == 'DRIVE_DIRECT':
-            drive_pay_total += calculate_direct_drive_pay(float(r['distance_km']))
+            # 直行直帰: 距離手当のみ (時間は給与計算に含めない)
+            fixed_pay_total += calculate_direct_drive_pay(float(r['distance_km']))
             
         elif r['type'] == 'DRIVE':
-            drive_pay_total += calculate_driving_allowance(float(r['distance_km']))
-            for m in range(sh*60 + sm, eh*60 + em): work_minutes.add(m)
+            # 通常運転: 距離手当 + 時間給(drive_wage)
+            fixed_pay_total += calculate_driving_allowance(float(r['distance_km']))
+            for m in range(sh*60 + sm, eh*60 + em):
+                minute_wage_map[m] = drive_wage / 60
             
         elif r['type'] == 'WORK':
-            for m in range(sh*60 + sm, eh*60 + em): work_minutes.add(m)
+            # 勤務: 時間給(base_wage)
+            for m in range(sh*60 + sm, eh*60 + em):
+                minute_wage_map[m] = base_wage / 60
             
         elif r['type'] == 'BREAK':
-            for m in range(sh*60 + sm, eh*60 + em): break_minutes.add(m)
+            # 休憩: マップから削除
+            for m in range(sh*60 + sm, eh*60 + em):
+                if m in minute_wage_map:
+                    del minute_wage_map[m]
     
-    actual_work = sorted(list(work_minutes - break_minutes))
-    total_min = len(actual_work)
-    
-    base_min_rate = base_wage / 60
+    # 2. 積み上げ計算
+    # 分を昇順にソート
+    sorted_minutes = sorted(minute_wage_map.keys())
     total_work_pay = 0.0
     
-    for i, m in enumerate(actual_work):
-        rate = base_min_rate
-        if NIGHT_START <= m < NIGHT_END:
-            rate += (base_min_rate * 0.25)
-        if i >= OVERTIME_THRESHOLD:
-            rate += (base_min_rate * 0.25)
-        total_work_pay += rate
+    for i, m in enumerate(sorted_minutes):
+        base_rate = minute_wage_map[m]
         
-    return math.floor(total_work_pay) + drive_pay_total + other_pay_total, total_min
+        multiplier = 1.0
+        
+        # 夜勤 (22:00 - 27:00)
+        if NIGHT_START <= m < NIGHT_END:
+            multiplier += 0.25
+            
+        # 残業 (8時間=480分 を超えたら)
+        # i は0始まりなので、i=480 が 481分目
+        if i >= OVERTIME_THRESHOLD:
+            multiplier += 0.25
+        
+        # 倍率は加算方式 (1.0 + 0.25 + 0.25 = 1.5) なのか乗算 (1.25 * 1.25 = 1.5625) なのか
+        # 以前の指示「夜勤かつ8時間超越の場合1.25の二乗」= 1.5625
+        
+        final_multiplier = 1.0
+        is_night = (NIGHT_START <= m < NIGHT_END)
+        is_overtime = (i >= OVERTIME_THRESHOLD)
+        
+        if is_night and is_overtime:
+            final_multiplier = 1.25 * 1.25 # 1.5625
+        elif is_night or is_overtime:
+            final_multiplier = 1.25
+            
+        total_work_pay += base_rate * final_multiplier
+        
+    return math.floor(total_work_pay) + fixed_pay_total, len(sorted_minutes)
 
 def format_time_label(h, m):
     prefix = "翌" if h >= 24 else ""
@@ -211,7 +238,7 @@ def change_month(amount):
     st.session_state.view_month = m
     st.session_state.view_year = y
 
-def get_calendar_summary(wage):
+def get_calendar_summary(wage_w, wage_d):
     df = get_all_records_df()
     if df.empty: return {}
     summary = {}
@@ -219,7 +246,7 @@ def get_calendar_summary(wage):
     for d in unique_dates:
         day_df = df[df['date_str'] == d]
         records = day_df.to_dict('records')
-        pay, mins = calculate_daily_total(records, wage)
+        pay, mins = calculate_daily_total(records, wage_w, wage_d)
         summary[d] = {'pay': pay, 'min': mins}
     return summary
 
@@ -248,7 +275,7 @@ with tab_setting:
     st.markdown("""
     <div style='font-size:12px; color:#aaa; margin-top:10px;'>
     ・日中: 基本給<br>
-    ・夜勤 (22:00-28:00): 1.25倍<br>
+    ・夜勤 (22:00-27:00): 1.25倍<br>
     ・残業 (8時間超): 1.25倍<br>
     ・運転手当: 距離に応じて加算<br>
     ・直行直帰: 25円/km (時給なし)
@@ -315,7 +342,6 @@ with tab_input:
             
             is_direct = st.toggle("直行直帰 (時給なし・25円/km)", value=False)
             
-            # session_stateから取得（なければ0）
             curr_km = int(st.session_state.get('d_km', 0))
             
             if is_direct:
@@ -335,7 +361,6 @@ with tab_input:
                     </div>
                 """, unsafe_allow_html=True)
                 
-            # 1km単位の整数スライダー
             dist_km = st.slider("km", 0, 350, 0, 1, key="d_km", label_visibility="collapsed")
         
         st.markdown("<div style='height:15px'></div>", unsafe_allow_html=True)
@@ -343,8 +368,6 @@ with tab_input:
         if st.button("追加", type="primary", use_container_width=True):
             if (sh*60+sm) >= (eh*60+em):
                 st.error("開始 < 終了 にしてください")
-            elif "運転" in record_type and dist_km == 0:
-                st.error("距離を入力してください")
             else:
                 if "運転" in record_type:
                     r_code = "DRIVE_DIRECT" if is_direct else "DRIVE"
@@ -369,7 +392,8 @@ with tab_input:
     st.markdown("<div style='font-size:12px; font-weight:bold; color:#888; margin-top:20px; margin-bottom:5px;'>登録済みリスト</div>", unsafe_allow_html=True)
     
     day_recs = get_records_by_date(input_date_str)
-    day_pay, day_min = calculate_daily_total(day_recs, st.session_state.base_wage)
+    # 再計算 (引数に運転時給も渡す)
+    day_pay, day_min = calculate_daily_total(day_recs, st.session_state.base_wage, st.session_state.wage_drive)
     
     if not day_recs:
         st.caption("なし")
@@ -389,7 +413,6 @@ with tab_input:
                     time_str = f"{format_time_label(s_h, s_m)} ~ {format_time_label(e_h, e_m)}"
                     
                     if r['type'] == "DRIVE_DIRECT":
-                        # 整数化
                         dist = int(float(r['distance_km']))
                         pay = calculate_direct_drive_pay(dist)
                         tag_cls, tag_txt = "tag-direct", "直行直帰"
@@ -447,7 +470,7 @@ with tab_calendar:
             change_month(1); st.rerun()
     
     st.write("")
-    summary = get_calendar_summary(st.session_state.base_wage)
+    summary = get_calendar_summary(st.session_state.base_wage, st.session_state.wage_drive)
     
     total_pay = 0
     total_min = 0
