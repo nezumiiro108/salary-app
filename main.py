@@ -80,7 +80,8 @@ def get_records_by_date(date_str):
     df = get_all_records_df()
     if df.empty: return []
     filtered = df[df['date_str'] == date_str].copy()
-    return filtered.to_dict('records')
+    # ソートは必須（時系列順）
+    return filtered.sort_values(by=['start_h', 'start_m']).to_dict('records')
 
 def get_min_record_date():
     df = get_all_records_df()
@@ -115,10 +116,10 @@ def save_setting(key, value):
         conn.update(worksheet="settings", data=df)
         st.cache_data.clear()
 
-# --- 4. 計算ロジック (タイムライン方式) ---
-NIGHT_START = 22 * 60       # 22:00 (1320)
-NIGHT_END = 27 * 60         # 27:00 (1620)
-OVERTIME_THRESHOLD = 8 * 60 # 480分
+# --- 4. 計算ロジック (精度改善版) ---
+NIGHT_START = 22 * 60
+NIGHT_END = 27 * 60
+OVERTIME_THRESHOLD = 8 * 60
 
 def calculate_driving_allowance(km):
     km = int(km)
@@ -131,85 +132,75 @@ def calculate_direct_drive_pay(km):
     return int(km) * 25
 
 def calculate_daily_total(records, base_wage, drive_wage):
-    # 1. タイムライン初期化 (0:00 ~ 48:00まで確保)
-    # 配列のインデックス = 分
+    # タイムライン作成 (0:00 ~ 48:00)
     timeline = [None] * (48 * 60)
     fixed_pay = 0
     
-    # 2. 固定手当の計算 & アクティビティの振り分け
-    work_drive_records = []
-    break_records = []
+    # アクティビティの振り分け
+    # リストが start_h, start_m でソートされていることが前提
+    sorted_records = sorted(records, key=lambda x: int(x['start_h']) * 60 + int(x['start_m']))
     
-    for r in records:
+    for r in sorted_records:
+        sh, sm = int(r['start_h']), int(r['start_m'])
+        eh, em = int(r['end_h']), int(r['end_m'])
+        
         if r['type'] == 'OTHER':
             fixed_pay += int(r['pay_amount'])
-        elif r['type'] == 'DRIVE_DIRECT':
-            # 直行直帰: 時間計算に含めない、距離手当のみ
-            fixed_pay += calculate_direct_drive_pay(float(r['distance_km']))
-        elif r['type'] == 'DRIVE':
-            # 通常運転: 距離手当 + 時間計算対象
-            fixed_pay += calculate_driving_allowance(float(r['distance_km']))
-            work_drive_records.append(r)
-        elif r['type'] == 'WORK':
-            work_drive_records.append(r)
-        elif r['type'] == 'BREAK':
-            break_records.append(r)
+            continue
             
-    # 3. タイムラインへの塗り込み (上書きロジック)
-    
-    # Pass 1: 勤務・運転を塗る
-    for r in work_drive_records:
-        sh, sm = int(r['start_h']), int(r['start_m'])
-        eh, em = int(r['end_h']), int(r['end_m'])
-        start_m = sh * 60 + sm
-        end_m = eh * 60 + em
+        dist = float(r['distance_km'])
         
-        activity = 'DRIVE' if r['type'] == 'DRIVE' else 'WORK'
-        
-        for m in range(start_m, end_m):
+        if r['type'] == 'DRIVE_DIRECT':
+            fixed_pay += calculate_direct_drive_pay(dist)
+            continue
+            
+        if r['type'] == 'DRIVE':
+            fixed_pay += calculate_driving_allowance(dist)
+            activity = 'DRIVE'
+        elif r['type'] == 'WORK':
+            activity = 'WORK'
+        elif r['type'] == 'BREAK':
+            activity = 'BREAK'
+        else:
+            continue
+            
+        # タイムライン塗りつぶし
+        s_min = sh * 60 + sm
+        e_min = eh * 60 + em
+        for m in range(s_min, e_min):
             if m < len(timeline):
                 timeline[m] = activity
-                
-    # Pass 2: 休憩を上書きする (これにより重複部分が休憩になる)
-    for r in break_records:
-        sh, sm = int(r['start_h']), int(r['start_m'])
-        eh, em = int(r['end_h']), int(r['end_m'])
-        start_m = sh * 60 + sm
-        end_m = eh * 60 + em
-        
-        for m in range(start_m, end_m):
-            if m < len(timeline):
-                timeline[m] = 'BREAK'
-                
-    # 4. 積み上げ計算
-    total_work_pay = 0.0
+
+    # 計算 (誤差が出ないよう「時給の積み上げ」を行う)
+    total_wage_points = 0.0
     accumulated_work_minutes = 0
-    
-    min_wage_work = base_wage / 60
-    min_wage_drive = drive_wage / 60
     
     for m in range(len(timeline)):
         act = timeline[m]
+        if act not in ['WORK', 'DRIVE']:
+            continue
+            
+        # この1分間の基本価値 (時給そのまま)
+        base_rate = drive_wage if act == 'DRIVE' else base_wage
         
-        # WORKまたはDRIVEの場合のみ計算 (BREAKやNoneはスキップ)
-        if act in ['WORK', 'DRIVE']:
-            # 基本単価
-            rate = min_wage_drive if act == 'DRIVE' else min_wage_work
+        multiplier = 1.0
+        is_night = (NIGHT_START <= m < NIGHT_END)
+        is_overtime = (accumulated_work_minutes >= OVERTIME_THRESHOLD)
+        
+        if is_night and is_overtime:
+            multiplier = 1.5625
+        elif is_night or is_overtime:
+            multiplier = 1.25
             
-            # 割増判定
-            is_night = (NIGHT_START <= m < NIGHT_END)
-            is_overtime = (accumulated_work_minutes >= OVERTIME_THRESHOLD)
-            
-            multiplier = 1.0
-            if is_night and is_overtime:
-                multiplier = 1.5625 # 1.25 * 1.25
-            elif is_night or is_overtime:
-                multiplier = 1.25
-                
-            total_work_pay += rate * multiplier
-            accumulated_work_minutes += 1
-            
-    return math.floor(total_work_pay) + fixed_pay, accumulated_work_minutes
+        # ポイント加算 (時給 * 倍率)
+        total_wage_points += base_rate * multiplier
+        accumulated_work_minutes += 1
+    
+    # 最後にまとめて60で割って切り捨て
+    # これにより「1190 / 60 = 19.833...」のような端数誤差が出なくなる
+    total_work_pay = math.floor(total_wage_points / 60)
+    
+    return total_work_pay + fixed_pay, accumulated_work_minutes
 
 def format_time_label(h, m):
     prefix = "翌" if h >= 24 else ""
@@ -372,12 +363,13 @@ with tab_input:
                 new_data = {
                     "date_str": input_date_str, "type": r_code,
                     "start_h": sh, "start_m": sm, "end_h": eh, "end_m": em,
-                    "distance_km": dist_km, "pay_amount": 0,
+                    "distance_km": dist_km, "pay_amount": 0, 
                     "duration_minutes": (eh*60+em) - (sh*60+sm)
                 }
                 save_record_to_sheet(new_data)
                 st.rerun()
             
+    # === 登録済みリスト ===
     st.markdown("<div style='font-size:12px; font-weight:bold; color:#888; margin-top:20px; margin-bottom:5px;'>登録済みリスト</div>", unsafe_allow_html=True)
     
     day_recs = get_records_by_date(input_date_str)
@@ -391,8 +383,10 @@ with tab_input:
             with c1:
                 if r['type'] == "OTHER":
                     amt = int(r['pay_amount'])
+                    tag_cls, tag_txt = "tag-other", "その他"
                     desc = f"<span class='tag-plus'>+¥{amt:,}</span>" if amt>=0 else f"<span class='tag-minus'>-¥{abs(amt):,}</span>"
-                    html = f"<div class='history-row'><div><span class='tag tag-other'>その他</span></div><div style='font-size:12px;'>{desc}</div></div>"
+                    html = f"<div class='history-row'><div><span class='tag {tag_cls}'>{tag_txt}</span></div><div style='font-size:12px;'>{desc}</div></div>"
+                
                 else:
                     s_h, s_m = int(r['start_h']), int(r['start_m'])
                     e_h, e_m = int(r['end_h']), int(r['end_m'])
@@ -401,15 +395,22 @@ with tab_input:
                     if r['type'] == "DRIVE_DIRECT":
                         dist = int(float(r['distance_km']))
                         pay = calculate_direct_drive_pay(dist)
-                        html = f"<div class='history-row'><div><span class='tag tag-direct'>直行直帰</span> <span style='font-size:12px;'>{time_str} <span style='color:#ffddaa; font-size:10px;'>({dist}km/¥{pay:,})</span></span></div></div>"
+                        tag_cls, tag_txt = "tag-direct", "直行直帰"
+                        info_txt = f"{time_str} <span style='color:#ffddaa; font-size:10px;'>({dist}km/¥{pay:,})</span>"
                     elif r['type'] == "DRIVE":
                         dist = int(float(r['distance_km']))
                         pay = calculate_driving_allowance(dist)
-                        html = f"<div class='history-row'><div><span class='tag tag-drive'>運転</span> <span style='font-size:12px;'>{time_str} <span style='color:#aaffdd; font-size:10px;'>({dist}km/¥{pay:,})</span></span></div></div>"
+                        tag_cls, tag_txt = "tag-drive", "運転"
+                        info_txt = f"{time_str} <span style='color:#aaffdd; font-size:10px;'>({dist}km/¥{pay:,})</span>"
                     elif r['type'] == "BREAK":
-                        html = f"<div class='history-row'><div><span class='tag tag-break'>休憩</span> <span style='font-size:12px;'>{time_str}</span></div></div>"
+                        tag_cls, tag_txt = "tag-break", "休憩"
+                        info_txt = time_str
                     else:
-                        html = f"<div class='history-row'><div><span class='tag tag-work'>勤務</span> <span style='font-size:12px;'>{time_str}</span></div></div>"
+                        tag_cls, tag_txt = "tag-work", "勤務"
+                        info_txt = time_str
+                    
+                    html = f"<div class='history-row'><div><span class='tag {tag_cls}'>{tag_txt}</span> <span style='font-size:12px;'>{info_txt}</span></div></div>"
+                
                 st.markdown(html, unsafe_allow_html=True)
                 
             with c2:
@@ -488,9 +489,11 @@ with tab_calendar:
                 curr_d = datetime.date(st.session_state.view_year, st.session_state.view_month, day)
                 d_str = curr_d.strftime("%Y-%m-%d")
                 pay_val = summary.get(d_str, {'pay': 0})['pay']
+                
                 extra_cls = "cal-today" if curr_d == today_d else ""
                 pay_disp = f"¥{pay_val:,}" if pay_val > 0 else ""
                 pay_div = f'<div class="cal-pay">{pay_disp}</div>' if pay_disp else ""
+                
                 html_parts.append(f'<div class="cal-day {extra_cls}"><div class="cal-num">{day}</div>{pay_div}</div>')
                 
     html_parts.append('</div>') 
