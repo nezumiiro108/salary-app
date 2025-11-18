@@ -34,7 +34,7 @@ st.markdown("""
     .tag-work { background: #1c3a5e; color: #aaddff; }
     .tag-break { background: #4a1a1a; color: #ffaaaa; }
     .tag-drive { background: #1a4a3a; color: #aaffdd; }
-    .tag-direct { background: #5e4a1c; color: #ffddaa; border: 1px solid #cc9900; } /* 直行直帰用 */
+    .tag-direct { background: #5e4a1c; color: #ffddaa; border: 1px solid #cc9900; }
     .tag-other { background: #444444; color: #dddddd; border: 1px solid #666; }
     .tag-plus { color: #aaffdd; font-weight: bold; }
     .tag-minus { color: #ffaaaa; font-weight: bold; }
@@ -125,14 +125,12 @@ NIGHT_START = 22 * 60
 NIGHT_END = 28 * 60
 OVERTIME_THRESHOLD = 8 * 60
 
-# 通常の運転手当
 def calculate_driving_allowance(km):
     if km < 0.1: return 0
     if km < 10: return 150
     if km >= 340: return 3300
     return 300 + (math.floor((km - 10) / 30) * 300)
 
-# 直行直帰の手当 (25円/km, 整数部のみ)
 def calculate_direct_drive_pay(km):
     return math.floor(km) * 25
 
@@ -150,11 +148,9 @@ def calculate_daily_total(records, base_wage):
             other_pay_total += int(r['pay_amount'])
         
         elif r['type'] == 'DRIVE_DIRECT':
-            # 直行直帰: 距離手当のみ加算 (時給計算には含めない)
             drive_pay_total += calculate_direct_drive_pay(float(r['distance_km']))
             
         elif r['type'] == 'DRIVE':
-            # 通常運転: 手当 + 労働時間
             drive_pay_total += calculate_driving_allowance(float(r['distance_km']))
             for m in range(sh*60 + sm, eh*60 + em): work_minutes.add(m)
             
@@ -193,7 +189,6 @@ if 'base_wage' not in st.session_state:
     except:
         st.session_state.base_wage = 1190
 if 'wage_drive' not in st.session_state:
-    # 運転時給設定のロード (設定シートになければデフォルト1050)
     try:
         loaded_d = load_setting('wage_drive', '1050')
         st.session_state.wage_drive = int(float(loaded_d))
@@ -314,14 +309,12 @@ with tab_input:
         if "運転" in record_type:
             st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
             
-            # 直行直帰スイッチ
-            is_direct = st.toggle("🏠 直行直帰 (時給なし・25円/km)", value=False)
+            # 直行直帰スイッチ (絵文字削除)
+            is_direct = st.toggle("直行直帰 (時給なし・25円/km)", value=False)
             
             curr_km = st.session_state.get('d_km', 0.0)
             
-            # 計算内容の表示切り替え
             if is_direct:
-                # 直行直帰計算
                 curr_allowance = calculate_direct_drive_pay(curr_km)
                 st.markdown(f"""
                     <div style='display:flex; justify-content:space-between; align-items:end; margin-bottom:2px;'>
@@ -330,7 +323,6 @@ with tab_input:
                     </div>
                 """, unsafe_allow_html=True)
             else:
-                # 通常運転計算
                 curr_allowance = calculate_driving_allowance(curr_km)
                 st.markdown(f"""
                     <div style='display:flex; justify-content:space-between; align-items:end; margin-bottom:2px;'>
@@ -349,7 +341,6 @@ with tab_input:
             elif "運転" in record_type and dist_km == 0:
                 st.error("距離を入力してください")
             else:
-                # タイプ決定
                 if "運転" in record_type:
                     r_code = "DRIVE_DIRECT" if is_direct else "DRIVE"
                 elif "休憩" in record_type:
