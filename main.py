@@ -363,4 +363,135 @@ with tab_input:
                 st.error("開始 < 終了 にしてください")
             else:
                 if "運転" in record_type:
-                    r_code = "DRIVE_DIRECT" if is_direct
+                    r_code = "DRIVE_DIRECT" if is_direct else "DRIVE"
+                elif "休憩" in record_type:
+                    r_code = "BREAK"
+                else:
+                    r_code = "WORK"
+                
+                new_data = {
+                    "date_str": input_date_str, "type": r_code,
+                    "start_h": sh, "start_m": sm, "end_h": eh, "end_m": em,
+                    "distance_km": dist_km, "pay_amount": 0,
+                    "duration_minutes": (eh*60+em) - (sh*60+sm)
+                }
+                save_record_to_sheet(new_data)
+                st.rerun()
+            
+    st.markdown("<div style='font-size:12px; font-weight:bold; color:#888; margin-top:20px; margin-bottom:5px;'>登録済みリスト</div>", unsafe_allow_html=True)
+    
+    day_recs = get_records_by_date(input_date_str)
+    day_pay, day_min = calculate_daily_total(day_recs, st.session_state.base_wage, st.session_state.wage_drive)
+    
+    if not day_recs:
+        st.caption("なし")
+    else:
+        for r in day_recs:
+            c1, c2 = st.columns([0.85, 0.15]) 
+            with c1:
+                if r['type'] == "OTHER":
+                    amt = int(r['pay_amount'])
+                    desc = f"<span class='tag-plus'>+¥{amt:,}</span>" if amt>=0 else f"<span class='tag-minus'>-¥{abs(amt):,}</span>"
+                    html = f"<div class='history-row'><div><span class='tag tag-other'>その他</span></div><div style='font-size:12px;'>{desc}</div></div>"
+                else:
+                    s_h, s_m = int(r['start_h']), int(r['start_m'])
+                    e_h, e_m = int(r['end_h']), int(r['end_m'])
+                    time_str = f"{format_time_label(s_h, s_m)} ~ {format_time_label(e_h, e_m)}"
+                    
+                    if r['type'] == "DRIVE_DIRECT":
+                        dist = int(float(r['distance_km']))
+                        pay = calculate_direct_drive_pay(dist)
+                        html = f"<div class='history-row'><div><span class='tag tag-direct'>直行直帰</span> <span style='font-size:12px;'>{time_str} <span style='color:#ffddaa; font-size:10px;'>({dist}km/¥{pay:,})</span></span></div></div>"
+                    elif r['type'] == "DRIVE":
+                        dist = int(float(r['distance_km']))
+                        pay = calculate_driving_allowance(dist)
+                        html = f"<div class='history-row'><div><span class='tag tag-drive'>運転</span> <span style='font-size:12px;'>{time_str} <span style='color:#aaffdd; font-size:10px;'>({dist}km/¥{pay:,})</span></span></div></div>"
+                    elif r['type'] == "BREAK":
+                        html = f"<div class='history-row'><div><span class='tag tag-break'>休憩</span> <span style='font-size:12px;'>{time_str}</span></div></div>"
+                    else:
+                        html = f"<div class='history-row'><div><span class='tag tag-work'>勤務</span> <span style='font-size:12px;'>{time_str}</span></div></div>"
+                st.markdown(html, unsafe_allow_html=True)
+                
+            with c2:
+                st.markdown('<div style="height: 4px;"></div>', unsafe_allow_html=True)
+                if st.button("✕", key=f"del_{r['id']}"):
+                    delete_record_from_sheet(r['id'])
+                    st.rerun()
+        
+        st.markdown(f"""
+            <div class="total-area" style="margin-top:10px; background-color:#1f2933;">
+                <div class="total-sub">実働 {day_min//60}時間{day_min%60}分</div>
+                <div class="total-amount">計 ¥{day_pay:,}</div>
+            </div>
+        """, unsafe_allow_html=True)
+
+# ==========================================
+# TAB: カレンダー
+# ==========================================
+with tab_calendar:
+    min_rec = get_min_record_date()
+    min_lim = min_rec.replace(day=1)
+    curr_dt = datetime.date.today()
+    max_lim = curr_dt.replace(day=1)
+    view_d = datetime.date(st.session_state.view_year, st.session_state.view_month, 1)
+    
+    go_prev = view_d > min_lim
+    go_next = view_d < max_lim
+
+    c1, c2, c3 = st.columns([1, 3, 1])
+    with c1: 
+        if st.button("◀", use_container_width=True, disabled=not go_prev): 
+            change_month(-1); st.rerun()
+    with c2:
+        st.markdown(f"<div style='text-align:center; font-weight:bold; padding-top:5px; color:#bbb;'>{st.session_state.view_year}年 {st.session_state.view_month}月</div>", unsafe_allow_html=True)
+    with c3:
+        if st.button("▶", use_container_width=True, disabled=not go_next): 
+            change_month(1); st.rerun()
+    
+    st.write("")
+    summary = get_calendar_summary(st.session_state.base_wage, st.session_state.wage_drive)
+    
+    total_pay = 0
+    total_min = 0
+    s_date = datetime.date(st.session_state.view_year, st.session_state.view_month, 1)
+    e_date = datetime.date(st.session_state.view_year, st.session_state.view_month, calendar.monthrange(st.session_state.view_year, st.session_state.view_month)[1])
+    curr = s_date
+    while curr <= e_date:
+        d_str = curr.strftime("%Y-%m-%d")
+        if d_str in summary:
+            total_pay += summary[d_str]['pay']
+            total_min += summary[d_str]['min']
+        curr += datetime.timedelta(days=1)
+
+    st.markdown(f"""
+    <div class="total-area">
+        <div class="total-sub">今月の支給予定額</div>
+        <div class="total-amount">¥ {total_pay:,}</div>
+        <div class="total-sub" style="margin-top:5px;">総稼働: {total_min//60}時間{total_min%60}分</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    html_parts = ['<div class="calendar-grid">']
+    for w in ["日", "月", "火", "水", "木", "金", "土"]:
+        color = "#ff6666" if w=="日" else "#4da6ff" if w=="土" else "#aaa"
+        html_parts.append(f'<div class="cal-header" style="color:{color}">{w}</div>')
+    
+    cal_obj = calendar.Calendar(firstweekday=6)
+    month_days = cal_obj.monthdayscalendar(st.session_state.view_year, st.session_state.view_month)
+    today_d = datetime.date.today()
+
+    for week in month_days:
+        for day in week:
+            if day == 0:
+                html_parts.append('<div class="cal-day cal-empty"></div>')
+            else:
+                curr_d = datetime.date(st.session_state.view_year, st.session_state.view_month, day)
+                d_str = curr_d.strftime("%Y-%m-%d")
+                pay_val = summary.get(d_str, {'pay': 0})['pay']
+                extra_cls = "cal-today" if curr_d == today_d else ""
+                pay_disp = f"¥{pay_val:,}" if pay_val > 0 else ""
+                pay_div = f'<div class="cal-pay">{pay_disp}</div>' if pay_disp else ""
+                html_parts.append(f'<div class="cal-day {extra_cls}"><div class="cal-num">{day}</div>{pay_div}</div>')
+                
+    html_parts.append('</div>') 
+    st.markdown("".join(html_parts), unsafe_allow_html=True)
