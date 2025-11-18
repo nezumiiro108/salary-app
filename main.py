@@ -29,30 +29,20 @@ st.markdown("""
     .total-sub { font-size: 10px; color: #aaa; }
     
     /* 履歴リスト */
-    .history-row {
-        padding: 6px 0;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        color: #eee;
-        border-bottom: 1px solid #333;
-    }
-    /* タグデザイン */
+    .history-row { padding: 6px 0; display: flex; justify-content: space-between; align-items: center; color: #eee; border-bottom: 1px solid #333; }
     .tag { font-size: 10px; padding: 2px 6px; border-radius: 4px; margin-right: 5px; font-weight: normal; display: inline-block; }
     .tag-work { background: #1c3a5e; color: #aaddff; }
     .tag-break { background: #4a1a1a; color: #ffaaaa; }
     .tag-drive { background: #1a4a3a; color: #aaffdd; }
+    .tag-direct { background: #5e4a1c; color: #ffddaa; border: 1px solid #cc9900; } /* 直行直帰用 */
     .tag-other { background: #444444; color: #dddddd; border: 1px solid #666; }
-    .tag-plus { color: #aaffdd; font-weight: bold; } /* プラス金額 */
-    .tag-minus { color: #ffaaaa; font-weight: bold; } /* マイナス金額 */
+    .tag-plus { color: #aaffdd; font-weight: bold; }
+    .tag-minus { color: #ffaaaa; font-weight: bold; }
 
     .stSlider { padding-bottom: 10px !important; }
     .stSlider label { font-size: 12px; color: #ddd !important; }
     
-    /* 削除ボタンの列調整 */
-    div[data-testid="column"] button {
-        float: right;
-    }
+    div[data-testid="column"] button { float: right; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -135,11 +125,16 @@ NIGHT_START = 22 * 60
 NIGHT_END = 28 * 60
 OVERTIME_THRESHOLD = 8 * 60
 
+# 通常の運転手当
 def calculate_driving_allowance(km):
     if km < 0.1: return 0
     if km < 10: return 150
     if km >= 340: return 3300
     return 300 + (math.floor((km - 10) / 30) * 300)
+
+# 直行直帰の手当 (25円/km, 整数部のみ)
+def calculate_direct_drive_pay(km):
+    return math.floor(km) * 25
 
 def calculate_daily_total(records, base_wage):
     work_minutes = set()
@@ -152,10 +147,14 @@ def calculate_daily_total(records, base_wage):
         eh, em = int(r['end_h']), int(r['end_m'])
         
         if r['type'] == 'OTHER':
-            # その他は直接加算 (pay_amountに正負の値が入っている)
             other_pay_total += int(r['pay_amount'])
         
+        elif r['type'] == 'DRIVE_DIRECT':
+            # 直行直帰: 距離手当のみ加算 (時給計算には含めない)
+            drive_pay_total += calculate_direct_drive_pay(float(r['distance_km']))
+            
         elif r['type'] == 'DRIVE':
+            # 通常運転: 手当 + 労働時間
             drive_pay_total += calculate_driving_allowance(float(r['distance_km']))
             for m in range(sh*60 + sm, eh*60 + em): work_minutes.add(m)
             
@@ -179,7 +178,6 @@ def calculate_daily_total(records, base_wage):
             rate += (base_min_rate * 0.25)
         total_work_pay += rate
         
-    # 労働給与 + 距離手当 + その他金額
     return math.floor(total_work_pay) + drive_pay_total + other_pay_total, total_min
 
 def format_time_label(h, m):
@@ -194,6 +192,13 @@ if 'base_wage' not in st.session_state:
         st.session_state.base_wage = int(float(loaded))
     except:
         st.session_state.base_wage = 1190
+if 'wage_drive' not in st.session_state:
+    # 運転時給設定のロード (設定シートになければデフォルト1050)
+    try:
+        loaded_d = load_setting('wage_drive', '1050')
+        st.session_state.wage_drive = int(float(loaded_d))
+    except:
+        st.session_state.wage_drive = 1050
 
 today = datetime.date.today()
 if 'view_year' not in st.session_state: st.session_state.view_year = today.year
@@ -228,10 +233,16 @@ tab_input, tab_calendar, tab_setting = st.tabs(["日次入力", "カレンダー
 with tab_setting:
     st.write("")
     st.subheader("設定")
-    new_wage = st.number_input("基本時給 (円)", value=st.session_state.base_wage, step=10)
+    
+    c1, c2 = st.columns(2)
+    new_wage = c1.number_input("基本時給 (円)", value=st.session_state.base_wage, step=10)
+    new_drive_wage = c2.number_input("運転時給 (円)", value=st.session_state.wage_drive, step=10)
+    
     if st.button("保存"):
         st.session_state.base_wage = new_wage
+        st.session_state.wage_drive = new_drive_wage
         save_setting('base_wage', new_wage)
+        save_setting('wage_drive', new_drive_wage)
         st.success("保存しました")
         st.rerun()
     
@@ -240,7 +251,8 @@ with tab_setting:
     ・日中: 基本給<br>
     ・夜勤 (22:00-28:00): 1.25倍<br>
     ・残業 (8時間超): 1.25倍<br>
-    ・運転手当: 距離に応じて加算
+    ・運転手当: 距離に応じて加算<br>
+    ・直行直帰: 25円/km (時給なし)
     </div>
     """, unsafe_allow_html=True)
 
@@ -249,14 +261,13 @@ with tab_setting:
 # ==========================================
 with tab_input:
     st.write("")
+    
     input_date = st.date_input("日付", value=datetime.date.today())
     input_date_str = input_date.strftime("%Y-%m-%d")
     
     st.markdown("---")
-    # 入力タイプのラジオボタン
     record_type = st.radio("タイプ", ["勤務", "休憩", "運転", "その他"], horizontal=True, label_visibility="collapsed")
     
-    # スライダー関数
     def time_sliders(label, kh, km, dh, dm):
         curr_h = st.session_state.get(kh, dh)
         curr_m = st.session_state.get(km, dm)
@@ -269,7 +280,6 @@ with tab_input:
     # === その他 (自由入力) ===
     if "その他" in record_type:
         st.markdown("<div style='height:15px'></div>", unsafe_allow_html=True)
-        
         c_type, c_amt = st.columns([1, 1.5])
         with c_type:
             other_kind = st.radio("区分", ["支給 (+)", "控除 (-)"], label_visibility="collapsed")
@@ -277,7 +287,6 @@ with tab_input:
             other_amount = st.number_input("金額 (円)", min_value=0, step=100)
         
         st.markdown("<div style='height:15px'></div>", unsafe_allow_html=True)
-        
         if st.button("その他を追加", type="primary", use_container_width=True):
             if other_amount <= 0:
                 st.error("金額を入力してください")
@@ -299,36 +308,62 @@ with tab_input:
         sh, sm = time_sliders("開始", "sh_in", "sm_in", 9, 0)
         eh, em = time_sliders("終了", "eh_in", "em_in", 18, 0)
         
-        dist_km = 0
+        dist_km = 0.0
+        is_direct = False
+        
         if "運転" in record_type:
             st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+            
+            # 直行直帰スイッチ
+            is_direct = st.toggle("🏠 直行直帰 (時給なし・25円/km)", value=False)
+            
             curr_km = st.session_state.get('d_km', 0.0)
-            curr_allowance = calculate_driving_allowance(curr_km)
-            st.markdown(f"""
-                <div style='display:flex; justify-content:space-between; align-items:end; margin-bottom:2px;'>
-                    <div style='font-size:11px; font-weight:bold; color:#55bb88;'>距離: {curr_km} km</div>
-                    <div style='font-size:11px; font-weight:bold; color:#55bb88;'>手当: ¥{curr_allowance:,}</div>
-                </div>
-            """, unsafe_allow_html=True)
+            
+            # 計算内容の表示切り替え
+            if is_direct:
+                # 直行直帰計算
+                curr_allowance = calculate_direct_drive_pay(curr_km)
+                st.markdown(f"""
+                    <div style='display:flex; justify-content:space-between; align-items:end; margin-bottom:2px;'>
+                        <div style='font-size:11px; font-weight:bold; color:#ffddaa;'>距離: {curr_km} km</div>
+                        <div style='font-size:11px; font-weight:bold; color:#ffddaa;'>支給: ¥{curr_allowance:,}</div>
+                    </div>
+                """, unsafe_allow_html=True)
+            else:
+                # 通常運転計算
+                curr_allowance = calculate_driving_allowance(curr_km)
+                st.markdown(f"""
+                    <div style='display:flex; justify-content:space-between; align-items:end; margin-bottom:2px;'>
+                        <div style='font-size:11px; font-weight:bold; color:#55bb88;'>距離: {curr_km} km</div>
+                        <div style='font-size:11px; font-weight:bold; color:#55bb88;'>手当: ¥{curr_allowance:,}</div>
+                    </div>
+                """, unsafe_allow_html=True)
+                
             dist_km = st.slider("km", 0.0, 350.0, 0.0, 0.1, key="d_km", label_visibility="collapsed")
         
         st.markdown("<div style='height:15px'></div>", unsafe_allow_html=True)
         
-        btn_label = "追加"
-        if st.button(btn_label, type="primary", use_container_width=True):
+        if st.button("追加", type="primary", use_container_width=True):
             if (sh*60+sm) >= (eh*60+em):
                 st.error("開始 < 終了 にしてください")
             elif "運転" in record_type and dist_km == 0:
                 st.error("距離を入力してください")
             else:
-                r_code = "DRIVE" if "運転" in record_type else "BREAK" if "休憩" in record_type else "WORK"
+                # タイプ決定
+                if "運転" in record_type:
+                    r_code = "DRIVE_DIRECT" if is_direct else "DRIVE"
+                elif "休憩" in record_type:
+                    r_code = "BREAK"
+                else:
+                    r_code = "WORK"
+                
                 new_data = {
                     "date_str": input_date_str,
                     "type": r_code,
                     "start_h": sh, "start_m": sm,
                     "end_h": eh, "end_m": em,
                     "distance_km": dist_km,
-                    "pay_amount": 0, # 自動計算
+                    "pay_amount": 0, 
                     "duration_minutes": (eh*60+em) - (sh*60+sm)
                 }
                 save_record_to_sheet(new_data)
@@ -344,39 +379,29 @@ with tab_input:
         st.caption("なし")
     else:
         for r in day_recs:
-            # リストのレイアウト: 左(8) 右(2) で削除ボタンを右端に固定
             c1, c2 = st.columns([0.85, 0.15]) 
             with c1:
-                # 内容の作成
                 if r['type'] == "OTHER":
-                    # その他
                     amt = int(r['pay_amount'])
-                    tag_cls = "tag-other"
-                    tag_txt = "その他"
-                    
-                    if amt >= 0:
-                        desc_html = f"<span class='tag-plus'>+¥{amt:,}</span>"
-                    else:
-                        desc_html = f"<span class='tag-minus'>-¥{abs(amt):,}</span>"
-                    
-                    html = f"""
-                    <div class='history-row'>
-                        <div><span class='tag {tag_cls}'>{tag_txt}</span></div>
-                        <div style='font-size:12px;'>{desc_html}</div>
-                    </div>
-                    """
+                    tag_cls, tag_txt = "tag-other", "その他"
+                    desc = f"<span class='tag-plus'>+¥{amt:,}</span>" if amt>=0 else f"<span class='tag-minus'>-¥{abs(amt):,}</span>"
+                    html = f"<div class='history-row'><div><span class='tag {tag_cls}'>{tag_txt}</span></div><div style='font-size:12px;'>{desc}</div></div>"
                 
                 else:
-                    # 時間系
                     s_h, s_m = int(r['start_h']), int(r['start_m'])
                     e_h, e_m = int(r['end_h']), int(r['end_m'])
                     time_str = f"{format_time_label(s_h, s_m)} ~ {format_time_label(e_h, e_m)}"
                     
-                    if r['type'] == "DRIVE":
+                    if r['type'] == "DRIVE_DIRECT":
+                        dist = float(r['distance_km'])
+                        pay = calculate_direct_drive_pay(dist)
+                        tag_cls, tag_txt = "tag-direct", "直行直帰"
+                        info_txt = f"{time_str} <span style='color:#ffddaa; font-size:10px;'>({dist}km/¥{pay:,})</span>"
+                    elif r['type'] == "DRIVE":
+                        dist = float(r['distance_km'])
+                        pay = calculate_driving_allowance(dist)
                         tag_cls, tag_txt = "tag-drive", "運転"
-                        dist_allowance = calculate_driving_allowance(float(r['distance_km']))
-                        # 運転は手当を表示
-                        info_txt = f"{time_str} <span style='color:#aaa; font-size:10px;'>({r['distance_km']}km/¥{dist_allowance:,})</span>"
+                        info_txt = f"{time_str} <span style='color:#aaffdd; font-size:10px;'>({dist}km/¥{pay:,})</span>"
                     elif r['type'] == "BREAK":
                         tag_cls, tag_txt = "tag-break", "休憩"
                         info_txt = time_str
@@ -384,16 +409,11 @@ with tab_input:
                         tag_cls, tag_txt = "tag-work", "勤務"
                         info_txt = time_str
                     
-                    html = f"""
-                    <div class='history-row'>
-                        <div><span class='tag {tag_cls}'>{tag_txt}</span> <span style='font-size:12px;'>{info_txt}</span></div>
-                    </div>
-                    """
+                    html = f"<div class='history-row'><div><span class='tag {tag_cls}'>{tag_txt}</span> <span style='font-size:12px;'>{info_txt}</span></div></div>"
+                
                 st.markdown(html, unsafe_allow_html=True)
                 
             with c2:
-                # 削除ボタン
-                # 縦位置を合わせるための空行ハック
                 st.markdown('<div style="height: 4px;"></div>', unsafe_allow_html=True)
                 if st.button("✕", key=f"del_{r['id']}"):
                     delete_record_from_sheet(r['id'])
