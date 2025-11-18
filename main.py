@@ -8,7 +8,7 @@ from streamlit_gsheets import GSheetsConnection
 # --- 1. ページ設定 ---
 st.set_page_config(page_title="給料帳", layout="centered")
 
-# --- 2. デザイン (ダークモード & コンパクト & シンプル) ---
+# --- 2. デザイン ---
 st.markdown("""
     <style>
     .stApp { background-color: #0e1117; color: #fafafa; }
@@ -36,76 +36,64 @@ st.markdown("""
 # --- 3. Google Sheets 接続 ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# データ取得・保存関数
+# ★高速化ポイント1: データの読み込みをキャッシュする
+# ttl=600 (10分間) はスプレッドシートを見に行かず、メモリ内のデータを使う
+# 書き込みが行われたときだけ、このキャッシュをクリアする
 def get_all_records_df():
-    """recordsシートから全データをDataFrameとして取得"""
     try:
-        df = conn.read(worksheet="records", ttl=0)
-        # カラムの型変換（エラー防止）
+        # ttl=600秒 (10分間キャッシュ)
+        df = conn.read(worksheet="records", ttl=600)
         df = df.fillna(0)
         df['id'] = pd.to_numeric(df['id'], errors='coerce').fillna(0).astype(int)
         df['date_str'] = df['date_str'].astype(str)
         return df
     except Exception:
-        # シートが空などの場合、空のDFを返す
         return pd.DataFrame(columns=['id', 'date_str', 'type', 'start_h', 'start_m', 'end_h', 'end_m', 'distance_km', 'pay_amount', 'duration_minutes'])
 
 def save_record_to_sheet(new_record_dict):
-    """新しいレコードを追記"""
-    df = get_all_records_df()
-    
-    # 新しいIDの発番
-    new_id = 1
-    if not df.empty and 'id' in df.columns:
-        if df['id'].max() > 0:
-            new_id = df['id'].max() + 1
-    
-    new_record_dict['id'] = new_id
-    
-    # 新しい行を作成して結合
-    new_row = pd.DataFrame([new_record_dict])
-    updated_df = pd.concat([df, new_row], ignore_index=True)
-    
-    # 保存
-    conn.update(worksheet="records", data=updated_df)
-    st.cache_data.clear() # キャッシュクリア
+    # ★高速化ポイント2: 書き込み中はスピナーを表示してフリーズ感をなくす
+    with st.spinner("保存中..."):
+        df = get_all_records_df()
+        new_id = 1
+        if not df.empty and 'id' in df.columns:
+            if df['id'].max() > 0:
+                new_id = df['id'].max() + 1
+        
+        new_record_dict['id'] = new_id
+        new_row = pd.DataFrame([new_record_dict])
+        updated_df = pd.concat([df, new_row], ignore_index=True)
+        
+        conn.update(worksheet="records", data=updated_df)
+        st.cache_data.clear() # ★重要: データが変わったのでキャッシュを捨てる
 
 def delete_record_from_sheet(record_id):
-    """指定IDのレコードを削除"""
-    df = get_all_records_df()
-    if not df.empty:
-        updated_df = df[df['id'] != record_id]
-        conn.update(worksheet="records", data=updated_df)
-        st.cache_data.clear()
+    with st.spinner("削除中..."):
+        df = get_all_records_df()
+        if not df.empty:
+            updated_df = df[df['id'] != record_id]
+            conn.update(worksheet="records", data=updated_df)
+            st.cache_data.clear() # キャッシュクリア
 
 def get_records_by_date(date_str):
-    """特定の日付のデータを辞書リストで返す"""
     df = get_all_records_df()
     if df.empty: return []
-    
-    # 日付でフィルタリング
     filtered = df[df['date_str'] == date_str].copy()
-    # 辞書リストに変換
     return filtered.to_dict('records')
 
 def get_min_record_date():
-    """一番古い日付を取得"""
     df = get_all_records_df()
     if df.empty: return datetime.date.today()
-    
     try:
         min_date_str = df['date_str'].min()
         return datetime.datetime.strptime(min_date_str, '%Y-%m-%d').date()
     except:
         return datetime.date.today()
 
-# 設定の読み書き (settingsシートを使用)
 def load_setting(key, default_value):
     try:
-        df = conn.read(worksheet="settings", ttl=0)
+        # 設定もキャッシュ
+        df = conn.read(worksheet="settings", ttl=600)
         if df.empty: return default_value
-        
-        # key列から検索
         row = df[df['key'] == key]
         if not row.empty:
             return row.iloc[0]['value']
@@ -114,20 +102,20 @@ def load_setting(key, default_value):
         return default_value
 
 def save_setting(key, value):
-    try:
-        df = conn.read(worksheet="settings", ttl=0)
-    except:
-        df = pd.DataFrame(columns=['key', 'value'])
-        
-    # 既存のキーがあれば更新、なければ追加
-    if key in df['key'].values:
-        df.loc[df['key'] == key, 'value'] = str(value)
-    else:
-        new_row = pd.DataFrame([{'key': key, 'value': str(value)}])
-        df = pd.concat([df, new_row], ignore_index=True)
-        
-    conn.update(worksheet="settings", data=df)
-    st.cache_data.clear()
+    with st.spinner("設定保存中..."):
+        try:
+            df = conn.read(worksheet="settings", ttl=0)
+        except:
+            df = pd.DataFrame(columns=['key', 'value'])
+            
+        if key in df['key'].values:
+            df.loc[df['key'] == key, 'value'] = str(value)
+        else:
+            new_row = pd.DataFrame([{'key': key, 'value': str(value)}])
+            df = pd.concat([df, new_row], ignore_index=True)
+            
+        conn.update(worksheet="settings", data=df)
+        st.cache_data.clear()
 
 # --- 4. 計算ロジック ---
 NIGHT_START = 22 * 60
@@ -146,7 +134,6 @@ def calculate_daily_total(records, base_wage):
     drive_pay_total = 0
     
     for r in records:
-        # DataFrameから来るデータはfloatの可能性があるためint変換
         sh, sm = int(r['start_h']), int(r['start_m'])
         eh, em = int(r['end_h']), int(r['end_m'])
         
@@ -181,7 +168,6 @@ def format_time_label(h, m):
 
 # --- 5. セッション ---
 if 'base_wage' not in st.session_state:
-    # 読み込み失敗時は初期値1190
     try:
         loaded = load_setting('base_wage', '1190')
         st.session_state.base_wage = int(float(loaded))
@@ -203,18 +189,13 @@ def change_month(amount):
 def get_calendar_summary(wage):
     df = get_all_records_df()
     if df.empty: return {}
-    
-    # 日付ごとにグループ化
     summary = {}
-    # date_strでユニークな日付を取得
     unique_dates = df['date_str'].unique()
-    
     for d in unique_dates:
         day_df = df[df['date_str'] == d]
         records = day_df.to_dict('records')
         pay, mins = calculate_daily_total(records, wage)
         summary[d] = {'pay': pay, 'min': mins}
-        
     return summary
 
 # --- 6. メイン表示 ---
@@ -248,7 +229,6 @@ with tab_setting:
 with tab_input:
     st.write("")
     
-    # 入力日付
     input_date = st.date_input("日付", value=datetime.date.today())
     input_date_str = input_date.strftime("%Y-%m-%d")
     
@@ -289,22 +269,18 @@ with tab_input:
             st.error("距離を入力してください")
         else:
             r_code = "DRIVE" if "運転" in record_type else "BREAK" if "休憩" in record_type else "WORK"
-            
-            # データ作成 (辞書型)
             new_data = {
                 "date_str": input_date_str,
                 "type": r_code,
                 "start_h": sh, "start_m": sm,
                 "end_h": eh, "end_m": em,
                 "distance_km": dist_km,
-                "pay_amount": 0, # 計算は表示時に行うので0で保存
+                "pay_amount": 0,
                 "duration_minutes": (eh*60+em) - (sh*60+sm)
             }
-            
             save_record_to_sheet(new_data)
             st.rerun()
             
-    # 履歴
     st.markdown("<div style='font-size:12px; font-weight:bold; color:#888; margin-top:20px; margin-bottom:5px;'>登録済みリスト</div>", unsafe_allow_html=True)
     
     day_recs = get_records_by_date(input_date_str)
@@ -316,10 +292,8 @@ with tab_input:
         for r in day_recs:
             c1, c2 = st.columns([5, 1])
             with c1:
-                # int変換
                 s_h, s_m = int(r['start_h']), int(r['start_m'])
                 e_h, e_m = int(r['end_h']), int(r['end_m'])
-                
                 time_str = f"{format_time_label(s_h, s_m)} ~ {format_time_label(e_h, e_m)}"
                 if r['type'] == "DRIVE":
                     html = f"<div class='history-row'><div><span class='tag tag-drive'>運転</span> <span style='font-size:12px;'>{time_str} ({r['distance_km']}km)</span></div></div>"
@@ -342,7 +316,7 @@ with tab_input:
         """, unsafe_allow_html=True)
 
 # ==========================================
-# TAB: カレンダー
+# TAB: カレンダー (Grid Layout)
 # ==========================================
 with tab_calendar:
     
@@ -406,10 +380,7 @@ with tab_calendar:
             else:
                 curr_d = datetime.date(st.session_state.view_year, st.session_state.view_month, day)
                 d_str = curr_d.strftime("%Y-%m-%d")
-                
-                pay_val = 0
-                if d_str in summary:
-                    pay_val = summary[d_str]['pay']
+                pay_val = summary.get(d_str, {'pay': 0})['pay']
                 
                 extra_cls = "cal-today" if curr_d == today_d else ""
                 pay_disp = f"¥{pay_val:,}" if pay_val > 0 else ""
