@@ -468,7 +468,6 @@ with tab_input:
         df_log = pd.DataFrame(st.session_state.DEBUG_LOG_STORE[input_date_str])
         
         with st.expander("▶️ 計算詳細ログ", expanded=False):
-            # final_points は Points_Accの最終値
             final_points = df_log['Points_Acc'].iloc[-1] if not df_log.empty else 0
             
             st.markdown(f"<b>最終ポイント合計:</b> {final_points:,.2f} / 60 = <b>¥{day_pay:,}</b>", unsafe_allow_html=True)
