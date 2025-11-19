@@ -17,14 +17,14 @@ st.markdown("""
     <style>
     /* 全体の背景をダークに固定 */
     .stApp { background-color: #0e1117; color: #fafafa; }
-    .block-container { padding-top: 2rem; padding-bottom: 5rem; max-width: 600px; }
+    .block-container { padding-top: 2rem; padding-bottom: 5rem; max_width: 600px; }
     
     /* カレンダー */
     .calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; margin-top: 5px; }
     .cal-header { text-align: center; font-size: 10px; font-weight: bold; color: #aaa; padding-bottom: 2px; }
     .cal-day { background-color: #262730; border: 1px solid #333; border-radius: 4px; height: 50px; display: flex; flex-direction: column; align-items: center; justify-content: center; }
     .cal-num { font-size: 10px; color: #ccc; margin: 0; line-height: 1.2; }
-    .cal-pay { font-size: 8.5px; font-weight: bold; color: #4da6ff; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; padding: 0 2px; }
+    .cal-pay { font-size: 8.5px; font-weight: bold; color: #4da6ff; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max_width: 100%; padding: 0 2px; }
     .cal-today { border: 1px solid #4da6ff; background-color: #1e2a3a; }
     .cal-empty { background-color: transparent; border: none; }
     
@@ -101,7 +101,8 @@ def get_min_record_date():
 
 def load_setting(key, default_value):
     try:
-        df = conn.read(worksheet="settings", ttl=600)
+        # 設定のキャッシュTTLを3600秒(60分)に延長
+        df = conn.read(worksheet="settings", ttl=3600)
         if df.empty: return default_value
         row = df[df['key'] == key]
         if not row.empty: return row.iloc[0]['value']
@@ -138,7 +139,7 @@ def calculate_driving_allowance(km):
 def calculate_direct_drive_pay(km):
     return int(km) * 25
 
-def calculate_daily_total(records, base_wage, drive_wage, date_str=""):
+def calculate_daily_total(records, base_wage, drive_wage):
     
     base_wage_dec = Decimal(base_wage)
     drive_wage_dec = Decimal(drive_wage)
@@ -150,6 +151,7 @@ def calculate_daily_total(records, base_wage, drive_wage, date_str=""):
     
     for r in sorted_records:
         try:
+            # データ型の安全な変換
             sh, sm = int(float(r['start_h'])), int(float(r['start_m']))
             eh, em = int(float(r['end_h'])), int(float(r['end_m']))
             dist = Decimal(r['distance_km'])
@@ -178,9 +180,6 @@ def calculate_daily_total(records, base_wage, drive_wage, date_str=""):
     total_wage_points = Decimal(0)
     accumulated_work_minutes = 0
     
-    debug_log_data = [] 
-    last_multiplier = 0.0
-    
     for i in range(len(timeline)):
         act = timeline[i]
         if act not in ['WORK', 'DRIVE']: continue
@@ -196,26 +195,10 @@ def calculate_daily_total(records, base_wage, drive_wage, date_str=""):
         elif is_night or is_overtime:
             multiplier = Decimal('1.25')
             
-        if (i == 0 or 
-            abs(float(multiplier) - last_multiplier) > 0.0001 or 
-            i == NIGHT_START or 
-            i == OVERTIME_THRESHOLD or
-            i == OVERTIME_THRESHOLD + 1):
-            
-            h_m = f"{i//60:02d}:{i%60:02d}"
-            
-            if not debug_log_data or debug_log_data[-1]['Time'] != h_m:
-                 debug_log_data.append({
-                    'Time': h_m, 'Act': act, 'Work_Acc': accumulated_work_minutes,
-                    'Mult': float(multiplier), 'Points_Acc': float(total_wage_points)
-                })
-            last_multiplier = float(multiplier)
-            
         total_wage_points += base_rate * multiplier
         accumulated_work_minutes += 1
     
-    st.session_state.DEBUG_LOG_STORE[date_str] = debug_log_data 
-    
+    # 最終処理
     total_work_pay_dec = (total_wage_points / Decimal(60))
     final_work_pay = total_work_pay_dec.to_integral_value(rounding=ROUND_FLOOR)
     
@@ -242,8 +225,6 @@ if 'wage_drive' not in st.session_state:
     except:
         st.session_state.wage_drive = 1050
 
-if 'DEBUG_LOG_STORE' not in st.session_state: st.session_state.DEBUG_LOG_STORE = {}
-
 today = datetime.date.today()
 if 'view_year' not in st.session_state: st.session_state.view_year = today.year
 if 'view_month' not in st.session_state: st.session_state.view_month = today.month
@@ -264,7 +245,7 @@ def get_calendar_summary(wage_w, wage_d):
     for d in unique_dates:
         day_df = df[df['date_str'] == d]
         records = day_df.to_dict('records')
-        pay, mins = calculate_daily_total(records, wage_w, wage_d, date_str="") 
+        pay, mins = calculate_daily_total(records, wage_w, wage_d) 
         summary[d] = {'pay': pay, 'min': mins}
     return summary
 
@@ -408,7 +389,7 @@ with tab_input:
     # === 登録済みリスト ===
     
     day_recs = get_records_by_date(input_date_str)
-    day_pay, day_min = calculate_daily_total(day_recs, st.session_state.base_wage, st.session_state.wage_drive, date_str=input_date_str)
+    day_pay, day_min = calculate_daily_total(day_recs, st.session_state.base_wage, st.session_state.wage_drive)
 
     st.markdown("<div style='font-size:12px; font-weight:bold; color:#888; margin-top:20px; margin-bottom:5px;'>登録済みリスト</div>", unsafe_allow_html=True)
     
@@ -462,23 +443,6 @@ with tab_input:
                 <div class="total-amount">計 ¥{day_pay:,}</div>
             </div>
         """, unsafe_allow_html=True)
-
-    # --- デバッグログ表示エリア ---
-    if input_date_str in st.session_state.DEBUG_LOG_STORE:
-        df_log = pd.DataFrame(st.session_state.DEBUG_LOG_STORE[input_date_str])
-        
-        with st.expander("▶️ 計算詳細ログ", expanded=False):
-            final_points = df_log['Points_Acc'].iloc[-1] if not df_log.empty else 0
-            
-            st.markdown(f"<b>最終ポイント合計:</b> {final_points:,.2f} / 60 = <b>¥{day_pay:,}</b>", unsafe_allow_html=True)
-            
-            st.dataframe(
-                df_log.drop(columns=['Points_Acc'], errors='ignore'),
-                use_container_width=True,
-                height=300
-            )
-            st.caption("※Work_Acc: 実働の累積時間(分)。480分で残業開始。")
-
 
 # ==========================================
 # TAB: カレンダー
@@ -535,10 +499,10 @@ with tab_calendar:
     month_days = cal_obj.monthdayscalendar(st.session_state.view_year, st.session_state.view_month)
     today_d = datetime.date.today()
 
-    cal_html_parts = [] # ★初期化
+    cal_html_parts = []
     cal_html_parts.append('<div class="calendar-grid">')
-    cal_html_parts.extend(html_parts) # ヘッダーを追加
-
+    cal_html_parts.extend(html_parts)
+    
     for week in month_days:
         for day in week:
             if day == 0:
