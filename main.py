@@ -535,10 +535,14 @@ with tab_calendar:
     month_days = cal_obj.monthdayscalendar(st.session_state.view_year, st.session_state.view_month)
     today_d = datetime.date.today()
 
+    cal_html_parts = [] # ★初期化
+    cal_html_parts.append('<div class="calendar-grid">')
+    cal_html_parts.extend(html_parts) # ヘッダーを追加
+
     for week in month_days:
         for day in week:
             if day == 0:
-                html_parts.append('<div class="cal-day cal-empty"></div>')
+                cal_html_parts.append('<div class="cal-day cal-empty"></div>')
             else:
                 curr_d = datetime.date(st.session_state.view_year, st.session_state.view_month, day)
                 d_str = curr_d.strftime("%Y-%m-%d")
@@ -550,4 +554,5 @@ with tab_calendar:
                 
                 cal_html_parts.append(f'<div class="cal-day {extra_cls}"><div class="cal-num">{day}</div>{pay_div}</div>')
                 
+    cal_html_parts.append('</div>') 
     st.markdown("".join(cal_html_parts), unsafe_allow_html=True)
