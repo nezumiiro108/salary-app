@@ -3,7 +3,7 @@ import datetime
 import math
 import pandas as pd
 from streamlit_gsheets import GSheetsConnection
-from decimal import Decimal, ROUND_FLOOR, getcontext
+from decimal import Decimal, ROUND_FLOOR, getcontext # ★ Decimalをインポート
 import calendar
 
 # Decimalの計算精度を高く設定（金融計算の標準的な対策）
@@ -15,6 +15,7 @@ st.set_page_config(page_title="給料帳", layout="centered")
 # --- 2. デザイン ---
 st.markdown("""
     <style>
+    /* 全体の背景をダークに固定 */
     .stApp { background-color: #0e1117; color: #fafafa; }
     .block-container { padding-top: 2rem; padding-bottom: 5rem; max-width: 600px; }
     
@@ -26,10 +27,12 @@ st.markdown("""
     .cal-today { border: 1px solid #4da6ff; background-color: #1e2a3a; }
     .cal-empty { background-color: transparent; border: none; }
     
+    /* 合計エリア */
     .total-area { text-align: center; padding: 10px; background-color: #262730; border-radius: 8px; border: 1px solid #444; color: #fff; margin-bottom: 15px; }
     .total-amount { font-size: 22px; font-weight: bold; color: #4da6ff; }
     .total-sub { font-size: 10px; color: #aaa; }
     
+    /* 履歴リスト */
     .history-row { padding: 6px 0; display: flex; justify-content: space-between; align-items: center; color: #eee; border-bottom: 1px solid #333; }
     .tag { font-size: 10px; padding: 2px 6px; border-radius: 4px; margin-right: 5px; font-weight: normal; display: inline-block; }
     .tag-work { background: #1c3a5e; color: #aaddff; }
@@ -119,7 +122,7 @@ def save_setting(key, value):
         conn.update(worksheet="settings", data=df)
         st.cache_data.clear()
 
-# --- 4. 計算ロジック ---
+# --- 4. 計算ロジック (精度保証版) ---
 NIGHT_START = 22 * 60
 NIGHT_END = 27 * 60
 OVERTIME_THRESHOLD = 8 * 60
@@ -136,7 +139,7 @@ def calculate_direct_drive_pay(km):
 
 def calculate_daily_total(records, base_wage, drive_wage):
     
-    # 1. Decimal型に変換 (正確性の確保)
+    # ★Decimal型に変換
     base_wage_dec = Decimal(base_wage)
     drive_wage_dec = Decimal(drive_wage)
     
@@ -184,7 +187,6 @@ def calculate_daily_total(records, base_wage, drive_wage):
         if act not in ['WORK', 'DRIVE']:
             continue
             
-        # 基本時給 (Decimal)
         base_rate = drive_wage_dec if act == 'DRIVE' else base_wage_dec
         
         multiplier = Decimal(1)
@@ -192,14 +194,15 @@ def calculate_daily_total(records, base_wage, drive_wage):
         is_overtime = (accumulated_work_minutes >= OVERTIME_THRESHOLD)
         
         if is_night and is_overtime:
-            multiplier = Decimal(1.5625) # 1.25 * 1.25
+            multiplier = Decimal('1.5625') # 1.25 * 1.25
         elif is_night or is_overtime:
-            multiplier = Decimal(1.25)
+            multiplier = Decimal('1.25')
             
+        # ★計算ロジックの改善: 時給 * 倍率をポイントとして積み上げる
         total_wage_points += base_rate * multiplier
         accumulated_work_minutes += 1
     
-    # 最後に60で割り、切り捨て (Decimalのto_integral_valueを使用)
+    # 3. 最後にまとめて60で割り、Decimalの切り捨て関数で切り捨て
     total_work_pay_dec = (total_wage_points / Decimal(60))
     final_work_pay = total_work_pay_dec.to_integral_value(rounding=ROUND_FLOOR)
     
@@ -306,7 +309,6 @@ with tab_input:
         with c2: vm = st.slider("分", 0, 59, dm, key=km, step=1, label_visibility="collapsed", disabled=disabled)
         return vh, vm
 
-    # === その他 (自由入力) ===
     if "その他" in record_type:
         st.markdown("<div style='height:15px'></div>", unsafe_allow_html=True)
         c_type, c_amt = st.columns([1, 1.5])
@@ -329,7 +331,6 @@ with tab_input:
                 save_record_to_sheet(new_data)
                 st.rerun()
 
-    # === 運転・勤務・休憩 (時間入力) ===
     else:
         is_drive = "運転" in record_type
         is_direct = False
@@ -338,7 +339,6 @@ with tab_input:
             st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
             is_direct = st.toggle("直行直帰 (時給なし・25円/km)", value=False)
         
-        # 直行直帰なら時間入力を無効化
         time_disabled = is_direct and is_drive
 
         sh, sm = time_sliders("開始", "sh_in", "sm_in", 9, 0, disabled=time_disabled)
@@ -372,14 +372,13 @@ with tab_input:
             if not time_disabled and (sh*60+sm) >= (eh*60+em):
                 st.error("開始 < 終了 にしてください")
             else:
-                if is_drive:
+                if "運転" in record_type:
                     r_code = "DRIVE_DIRECT" if is_direct else "DRIVE"
                 elif "休憩" in record_type:
                     r_code = "BREAK"
                 else:
                     r_code = "WORK"
                 
-                # 直行直帰の場合、時間は保存しない
                 save_sh, save_sm = (0, 0) if time_disabled else (sh, sm)
                 save_eh, save_em = (0, 0) if time_disabled else (eh, em)
                 
