@@ -178,7 +178,6 @@ def calculate_daily_total(records, base_wage, drive_wage, date_str=""):
     total_wage_points = Decimal(0)
     accumulated_work_minutes = 0
     
-    # デバッグログの初期化
     debug_log_data = [] 
     last_multiplier = 0.0
     
@@ -197,7 +196,6 @@ def calculate_daily_total(records, base_wage, drive_wage, date_str=""):
         elif is_night or is_overtime:
             multiplier = Decimal('1.25')
             
-        # ★デバッグロギング (状態変化時のみ記録)
         if (i == 0 or 
             abs(float(multiplier) - last_multiplier) > 0.0001 or 
             i == NIGHT_START or 
@@ -355,7 +353,7 @@ with tab_input:
             st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
             is_direct = st.toggle("直行直帰 (時給なし・25円/km)", value=False)
         
-        time_disabled = is_direct and is_drive # ★FIX
+        time_disabled = is_direct and is_drive
 
         sh, sm = time_sliders("開始", "sh_in", "sm_in", 9, 0, disabled=time_disabled)
         eh, em = time_sliders("終了", "eh_in", "em_in", 18, 0, disabled=time_disabled)
@@ -405,6 +403,7 @@ with tab_input:
                     "duration_minutes": (save_eh*60+save_em) - (save_sh*60+save_sm)
                 }
                 save_record_to_sheet(new_data)
+                st.session_state.LAST_CALC_DATE = input_date_str # ログ表示用に日付を保存
                 st.rerun()
             
     # === 登録済みリスト ===
