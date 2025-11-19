@@ -403,7 +403,6 @@ with tab_input:
                     "duration_minutes": (save_eh*60+save_em) - (save_sh*60+save_sm)
                 }
                 save_record_to_sheet(new_data)
-                st.session_state.LAST_CALC_DATE = input_date_str # ログ表示用に日付を保存
                 st.rerun()
             
     # === 登録済みリスト ===
@@ -469,12 +468,12 @@ with tab_input:
         df_log = pd.DataFrame(st.session_state.DEBUG_LOG_STORE[input_date_str])
         
         with st.expander("▶️ 計算詳細ログ", expanded=False):
-            final_points = df_log['Total_Points'].iloc[-1] if not df_log.empty else 0
+            final_points = df_log['Points_Acc'].iloc[-1] if not df_log.empty else 0
             
             st.markdown(f"<b>最終ポイント合計:</b> {final_points:,.2f} / 60 = <b>¥{day_pay:,}</b>", unsafe_allow_html=True)
             
             st.dataframe(
-                df_log.drop(columns=['Total_Points'], errors='ignore'),
+                df_log.drop(columns=['Points_Acc'], errors='ignore'),
                 use_container_width=True,
                 height=300
             )
