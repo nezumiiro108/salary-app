@@ -80,7 +80,6 @@ def get_records_by_date(date_str):
     df = get_all_records_df()
     if df.empty: return []
     filtered = df[df['date_str'] == date_str].copy()
-    # ソートは必須（時系列順）
     return filtered.sort_values(by=['start_h', 'start_m']).to_dict('records')
 
 def get_min_record_date():
@@ -116,7 +115,7 @@ def save_setting(key, value):
         conn.update(worksheet="settings", data=df)
         st.cache_data.clear()
 
-# --- 4. 計算ロジック (精度改善版) ---
+# --- 4. 計算ロジック ---
 NIGHT_START = 22 * 60
 NIGHT_END = 27 * 60
 OVERTIME_THRESHOLD = 8 * 60
@@ -132,12 +131,9 @@ def calculate_direct_drive_pay(km):
     return int(km) * 25
 
 def calculate_daily_total(records, base_wage, drive_wage):
-    # タイムライン作成 (0:00 ~ 48:00)
     timeline = [None] * (48 * 60)
     fixed_pay = 0
     
-    # アクティビティの振り分け
-    # リストが start_h, start_m でソートされていることが前提
     sorted_records = sorted(records, key=lambda x: int(x['start_h']) * 60 + int(x['start_m']))
     
     for r in sorted_records:
@@ -164,14 +160,12 @@ def calculate_daily_total(records, base_wage, drive_wage):
         else:
             continue
             
-        # タイムライン塗りつぶし
         s_min = sh * 60 + sm
         e_min = eh * 60 + em
         for m in range(s_min, e_min):
             if m < len(timeline):
                 timeline[m] = activity
 
-    # 計算 (誤差が出ないよう「時給の積み上げ」を行う)
     total_wage_points = 0.0
     accumulated_work_minutes = 0
     
@@ -180,7 +174,6 @@ def calculate_daily_total(records, base_wage, drive_wage):
         if act not in ['WORK', 'DRIVE']:
             continue
             
-        # この1分間の基本価値 (時給そのまま)
         base_rate = drive_wage if act == 'DRIVE' else base_wage
         
         multiplier = 1.0
@@ -192,14 +185,10 @@ def calculate_daily_total(records, base_wage, drive_wage):
         elif is_night or is_overtime:
             multiplier = 1.25
             
-        # ポイント加算 (時給 * 倍率)
         total_wage_points += base_rate * multiplier
         accumulated_work_minutes += 1
     
-    # 最後にまとめて60で割って切り捨て
-    # これにより「1190 / 60 = 19.833...」のような端数誤差が出なくなる
     total_work_pay = math.floor(total_wage_points / 60)
-    
     return total_work_pay + fixed_pay, accumulated_work_minutes
 
 def format_time_label(h, m):
@@ -288,13 +277,19 @@ with tab_input:
     st.markdown("---")
     record_type = st.radio("タイプ", ["勤務", "休憩", "運転", "その他"], horizontal=True, label_visibility="collapsed")
     
-    def time_sliders(label, kh, km, dh, dm):
+    # スライダー関数 (無効化フラグ disabled を追加)
+    def time_sliders(label, kh, km, dh, dm, disabled=False):
         curr_h = st.session_state.get(kh, dh)
         curr_m = st.session_state.get(km, dm)
-        st.markdown(f"<div style='font-size:11px; font-weight:bold; color:#aaa;'>{label}: <span style='color:#4da6ff;'>{format_time_label(curr_h, curr_m)}</span></div>", unsafe_allow_html=True)
+        
+        # 無効時は文字色を薄くする
+        title_color = "#aaa" if not disabled else "#555"
+        val_color = "#4da6ff" if not disabled else "#555"
+        
+        st.markdown(f"<div style='font-size:11px; font-weight:bold; color:{title_color};'>{label}: <span style='color:{val_color};'>{format_time_label(curr_h, curr_m)}</span></div>", unsafe_allow_html=True)
         c1, c2 = st.columns([1.3, 1])
-        with c1: vh = st.slider("時", 0, 33, dh, key=kh, label_visibility="collapsed")
-        with c2: vm = st.slider("分", 0, 59, dm, key=km, step=1, label_visibility="collapsed")
+        with c1: vh = st.slider("時", 0, 33, dh, key=kh, label_visibility="collapsed", disabled=disabled)
+        with c2: vm = st.slider("分", 0, 59, dm, key=km, step=1, label_visibility="collapsed", disabled=disabled)
         return vh, vm
 
     if "その他" in record_type:
@@ -319,15 +314,22 @@ with tab_input:
                 save_record_to_sheet(new_data)
                 st.rerun()
     else:
-        sh, sm = time_sliders("開始", "sh_in", "sm_in", 9, 0)
-        eh, em = time_sliders("終了", "eh_in", "em_in", 18, 0)
+        # --- 時間入力エリア ---
         
-        dist_km = 0
+        # 直行直帰かどうかを先に判定
         is_direct = False
-        
         if "運転" in record_type:
             st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
             is_direct = st.toggle("直行直帰 (時給なし・25円/km)", value=False)
+
+        # スライダー表示 (直行直帰なら disabled=True)
+        sh, sm = time_sliders("開始", "sh_in", "sm_in", 9, 0, disabled=is_direct)
+        eh, em = time_sliders("終了", "eh_in", "em_in", 18, 0, disabled=is_direct)
+        
+        dist_km = 0
+        
+        if "運転" in record_type:
+            # 距離スライダー
             curr_km = int(st.session_state.get('d_km', 0))
             
             if is_direct:
@@ -350,7 +352,8 @@ with tab_input:
         st.markdown("<div style='height:15px'></div>", unsafe_allow_html=True)
         
         if st.button("追加", type="primary", use_container_width=True):
-            if (sh*60+sm) >= (eh*60+em):
+            # 直行直帰なら時間チェックをスキップ
+            if not is_direct and (sh*60+sm) >= (eh*60+em):
                 st.error("開始 < 終了 にしてください")
             else:
                 if "運転" in record_type:
@@ -360,11 +363,19 @@ with tab_input:
                 else:
                     r_code = "WORK"
                 
+                # 直行直帰の場合、時間は保存しなくても良いが、
+                # DBエラー防止のため 0:00-0:00 (あるいは現在の入力値) を入れておく
+                save_sh, save_sm = (0, 0) if is_direct else (sh, sm)
+                save_eh, save_em = (0, 0) if is_direct else (eh, em)
+                
                 new_data = {
-                    "date_str": input_date_str, "type": r_code,
-                    "start_h": sh, "start_m": sm, "end_h": eh, "end_m": em,
-                    "distance_km": dist_km, "pay_amount": 0, 
-                    "duration_minutes": (eh*60+em) - (sh*60+sm)
+                    "date_str": input_date_str,
+                    "type": r_code,
+                    "start_h": save_sh, "start_m": save_sm,
+                    "end_h": save_eh, "end_m": save_em,
+                    "distance_km": dist_km,
+                    "pay_amount": 0, 
+                    "duration_minutes": (save_eh*60+save_em) - (save_sh*60+save_sm)
                 }
                 save_record_to_sheet(new_data)
                 st.rerun()
@@ -396,7 +407,8 @@ with tab_input:
                         dist = int(float(r['distance_km']))
                         pay = calculate_direct_drive_pay(dist)
                         tag_cls, tag_txt = "tag-direct", "直行直帰"
-                        info_txt = f"{time_str} <span style='color:#ffddaa; font-size:10px;'>({dist}km/¥{pay:,})</span>"
+                        # 直行直帰は時間を表示しない
+                        info_txt = f"<span style='color:#ffddaa; font-size:10px;'>{dist}km / ¥{pay:,}</span>"
                     elif r['type'] == "DRIVE":
                         dist = int(float(r['distance_km']))
                         pay = calculate_driving_allowance(dist)
