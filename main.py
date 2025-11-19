@@ -191,11 +191,13 @@ def calculate_daily_total(records, base_wage, drive_wage, date_str=""):
         is_night = (NIGHT_START <= i < NIGHT_END)
         is_overtime = (accumulated_work_minutes >= OVERTIME_THRESHOLD)
         
+        # ★FIX: 複合割増の判定ロジック
         if is_night and is_overtime:
-            multiplier = Decimal('1.5625') 
+            multiplier = Decimal('1.5625') # 1.25 * 1.25
         elif is_night or is_overtime:
             multiplier = Decimal('1.25')
-            
+        # ★FIX END
+
         if (i == 0 or 
             abs(float(multiplier) - last_multiplier) > 0.0001 or 
             i == NIGHT_START or 
@@ -353,6 +355,7 @@ with tab_input:
             st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
             is_direct = st.toggle("直行直帰 (時給なし・25円/km)", value=False)
         
+        # ★修正: time_disabled をここで定義
         time_disabled = is_direct and is_drive
 
         sh, sm = time_sliders("開始", "sh_in", "sm_in", 9, 0, disabled=time_disabled)
@@ -468,6 +471,7 @@ with tab_input:
         df_log = pd.DataFrame(st.session_state.DEBUG_LOG_STORE[input_date_str])
         
         with st.expander("▶️ 計算詳細ログ", expanded=False):
+            # キー名修正: Total_Points -> Points_Acc
             final_points = df_log['Points_Acc'].iloc[-1] if not df_log.empty else 0
             
             st.markdown(f"<b>最終ポイント合計:</b> {final_points:,.2f} / 60 = <b>¥{day_pay:,}</b>", unsafe_allow_html=True)
