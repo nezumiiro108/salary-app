@@ -15,11 +15,9 @@ st.set_page_config(page_title="給料帳", layout="centered")
 # --- 2. デザイン ---
 st.markdown("""
     <style>
-    /* 全体の背景をダークに固定 */
     .stApp { background-color: #0e1117; color: #fafafa; }
     .block-container { padding-top: 2rem; padding-bottom: 5rem; max-width: 600px; }
     
-    /* カレンダー */
     .calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; margin-top: 5px; }
     .cal-header { text-align: center; font-size: 10px; font-weight: bold; color: #aaa; padding-bottom: 2px; }
     .cal-day { background-color: #262730; border: 1px solid #333; border-radius: 4px; height: 50px; display: flex; flex-direction: column; align-items: center; justify-content: center; }
@@ -178,7 +176,7 @@ def calculate_daily_total(records, base_wage, drive_wage, date_str=""):
     total_wage_points = Decimal(0)
     accumulated_work_minutes = 0
     
-    debug_log_data = [] # デバッグログの初期化
+    debug_log_data = [] 
     last_multiplier = 0.0
     
     for i in range(len(timeline)):
@@ -215,7 +213,6 @@ def calculate_daily_total(records, base_wage, drive_wage, date_str=""):
         total_wage_points += base_rate * multiplier
         accumulated_work_minutes += 1
     
-    # ログをセッションに保存
     st.session_state.DEBUG_LOG_STORE[date_str] = debug_log_data 
     
     total_work_pay_dec = (total_wage_points / Decimal(60))
@@ -224,6 +221,11 @@ def calculate_daily_total(records, base_wage, drive_wage, date_str=""):
     grand_total_dec = final_work_pay + fixed_pay
     
     return int(grand_total_dec), accumulated_work_minutes
+
+def format_time_label(h, m):
+    prefix = "翌" if h >= 24 else ""
+    disp_h = h - 24 if h >= 24 else h
+    return f"{prefix}{disp_h:02}:{m:02}"
 
 # --- 5. セッション ---
 if 'base_wage' not in st.session_state:
@@ -262,7 +264,7 @@ def get_calendar_summary(wage_w, wage_d):
     for d in unique_dates:
         day_df = df[df['date_str'] == d]
         records = day_df.to_dict('records')
-        pay, mins = calculate_daily_total(records, wage_w, wage_d, date_str="") 
+        pay, mins = calculate_daily_total(records, wage_w, wage_d)
         summary[d] = {'pay': pay, 'min': mins}
     return summary
 
@@ -403,10 +405,9 @@ with tab_input:
                 save_record_to_sheet(new_data)
                 st.rerun()
             
-    # === 登録済みリスト & 計算 ===
+    # === 登録済みリスト ===
     
     day_recs = get_records_by_date(input_date_str)
-    # ここで計算が実行され、ログがセッションに保存される
     day_pay, day_min = calculate_daily_total(day_recs, st.session_state.base_wage, st.session_state.wage_drive, date_str=input_date_str)
 
     st.markdown("<div style='font-size:12px; font-weight:bold; color:#888; margin-top:20px; margin-bottom:5px;'>登録済みリスト</div>", unsafe_allow_html=True)
@@ -476,7 +477,7 @@ with tab_input:
                 use_container_width=True,
                 height=300
             )
-            st.caption("※Points_Acc: 時給換算での累積ポイント。最終値/60が給与です。")
+            st.caption("※Work_Acc: 実働の累積時間(分)。480分で残業開始。")
 
 
 # ==========================================
