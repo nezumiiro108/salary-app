@@ -3,7 +3,11 @@ import datetime
 import math
 import pandas as pd
 from streamlit_gsheets import GSheetsConnection
+from decimal import Decimal, ROUND_FLOOR, getcontext
 import calendar
+
+# Decimalの計算精度を高く設定（金融計算の標準的な対策）
+getcontext().prec = 30
 
 # --- 1. ページ設定 ---
 st.set_page_config(page_title="給料帳", layout="centered")
@@ -33,7 +37,7 @@ st.markdown("""
     .tag-drive { background: #1a4a3a; color: #aaffdd; }
     .tag-direct { background: #5e4a1c; color: #ffddaa; border: 1px solid #cc9900; }
     .tag-other { background: #444444; color: #dddddd; border: 1px solid #666; }
-    .tag-plus { color: #aaffdd; font-weight: bold; }
+    .tag-plus { color: #aaddff; font-weight: bold; }
     .tag-minus { color: #ffaaaa; font-weight: bold; }
 
     .stSlider { padding-bottom: 10px !important; }
@@ -131,8 +135,13 @@ def calculate_direct_drive_pay(km):
     return int(km) * 25
 
 def calculate_daily_total(records, base_wage, drive_wage):
+    
+    # 1. Decimal型に変換 (正確性の確保)
+    base_wage_dec = Decimal(base_wage)
+    drive_wage_dec = Decimal(drive_wage)
+    
     timeline = [None] * (48 * 60)
-    fixed_pay = 0
+    fixed_pay = Decimal(0)
     
     sorted_records = sorted(records, key=lambda x: int(x['start_h']) * 60 + int(x['start_m']))
     
@@ -141,17 +150,17 @@ def calculate_daily_total(records, base_wage, drive_wage):
         eh, em = int(r['end_h']), int(r['end_m'])
         
         if r['type'] == 'OTHER':
-            fixed_pay += int(r['pay_amount'])
+            fixed_pay += Decimal(r['pay_amount'])
             continue
             
-        dist = float(r['distance_km'])
+        dist = Decimal(r['distance_km'])
         
         if r['type'] == 'DRIVE_DIRECT':
-            fixed_pay += calculate_direct_drive_pay(dist)
+            fixed_pay += Decimal(calculate_direct_drive_pay(dist))
             continue
             
         if r['type'] == 'DRIVE':
-            fixed_pay += calculate_driving_allowance(dist)
+            fixed_pay += Decimal(calculate_driving_allowance(dist))
             activity = 'DRIVE'
         elif r['type'] == 'WORK':
             activity = 'WORK'
@@ -166,7 +175,8 @@ def calculate_daily_total(records, base_wage, drive_wage):
             if m < len(timeline):
                 timeline[m] = activity
 
-    total_wage_points = 0.0
+    # 2. 積み上げ計算
+    total_wage_points = Decimal(0)
     accumulated_work_minutes = 0
     
     for m in range(len(timeline)):
@@ -174,22 +184,29 @@ def calculate_daily_total(records, base_wage, drive_wage):
         if act not in ['WORK', 'DRIVE']:
             continue
             
-        base_rate = drive_wage if act == 'DRIVE' else base_wage
+        # 基本時給 (Decimal)
+        base_rate = drive_wage_dec if act == 'DRIVE' else base_wage_dec
         
-        multiplier = 1.0
+        multiplier = Decimal(1)
         is_night = (NIGHT_START <= m < NIGHT_END)
         is_overtime = (accumulated_work_minutes >= OVERTIME_THRESHOLD)
         
         if is_night and is_overtime:
-            multiplier = 1.5625
+            multiplier = Decimal(1.5625) # 1.25 * 1.25
         elif is_night or is_overtime:
-            multiplier = 1.25
+            multiplier = Decimal(1.25)
             
         total_wage_points += base_rate * multiplier
         accumulated_work_minutes += 1
     
-    total_work_pay = math.floor(total_wage_points / 60)
-    return total_work_pay + fixed_pay, accumulated_work_minutes
+    # 最後に60で割り、切り捨て (Decimalのto_integral_valueを使用)
+    total_work_pay_dec = (total_wage_points / Decimal(60))
+    final_work_pay = total_work_pay_dec.to_integral_value(rounding=ROUND_FLOOR)
+    
+    # 最終合計をintで返す
+    grand_total_dec = final_work_pay + fixed_pay
+    
+    return int(grand_total_dec), accumulated_work_minutes
 
 def format_time_label(h, m):
     prefix = "翌" if h >= 24 else ""
@@ -277,12 +294,9 @@ with tab_input:
     st.markdown("---")
     record_type = st.radio("タイプ", ["勤務", "休憩", "運転", "その他"], horizontal=True, label_visibility="collapsed")
     
-    # スライダー関数 (無効化フラグ disabled を追加)
     def time_sliders(label, kh, km, dh, dm, disabled=False):
         curr_h = st.session_state.get(kh, dh)
         curr_m = st.session_state.get(km, dm)
-        
-        # 無効時は文字色を薄くする
         title_color = "#aaa" if not disabled else "#555"
         val_color = "#4da6ff" if not disabled else "#555"
         
@@ -292,6 +306,7 @@ with tab_input:
         with c2: vm = st.slider("分", 0, 59, dm, key=km, step=1, label_visibility="collapsed", disabled=disabled)
         return vh, vm
 
+    # === その他 (自由入力) ===
     if "その他" in record_type:
         st.markdown("<div style='height:15px'></div>", unsafe_allow_html=True)
         c_type, c_amt = st.columns([1, 1.5])
@@ -313,23 +328,25 @@ with tab_input:
                 }
                 save_record_to_sheet(new_data)
                 st.rerun()
+
+    # === 運転・勤務・休憩 (時間入力) ===
     else:
-        # --- 時間入力エリア ---
-        
-        # 直行直帰かどうかを先に判定
+        is_drive = "運転" in record_type
         is_direct = False
-        if "運転" in record_type:
+        
+        if is_drive:
             st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
             is_direct = st.toggle("直行直帰 (時給なし・25円/km)", value=False)
+        
+        # 直行直帰なら時間入力を無効化
+        time_disabled = is_direct and is_drive
 
-        # スライダー表示 (直行直帰なら disabled=True)
-        sh, sm = time_sliders("開始", "sh_in", "sm_in", 9, 0, disabled=is_direct)
-        eh, em = time_sliders("終了", "eh_in", "em_in", 18, 0, disabled=is_direct)
+        sh, sm = time_sliders("開始", "sh_in", "sm_in", 9, 0, disabled=time_disabled)
+        eh, em = time_sliders("終了", "eh_in", "em_in", 18, 0, disabled=time_disabled)
         
         dist_km = 0
         
-        if "運転" in record_type:
-            # 距離スライダー
+        if is_drive:
             curr_km = int(st.session_state.get('d_km', 0))
             
             if is_direct:
@@ -352,29 +369,24 @@ with tab_input:
         st.markdown("<div style='height:15px'></div>", unsafe_allow_html=True)
         
         if st.button("追加", type="primary", use_container_width=True):
-            # 直行直帰なら時間チェックをスキップ
-            if not is_direct and (sh*60+sm) >= (eh*60+em):
+            if not time_disabled and (sh*60+sm) >= (eh*60+em):
                 st.error("開始 < 終了 にしてください")
             else:
-                if "運転" in record_type:
+                if is_drive:
                     r_code = "DRIVE_DIRECT" if is_direct else "DRIVE"
                 elif "休憩" in record_type:
                     r_code = "BREAK"
                 else:
                     r_code = "WORK"
                 
-                # 直行直帰の場合、時間は保存しなくても良いが、
-                # DBエラー防止のため 0:00-0:00 (あるいは現在の入力値) を入れておく
-                save_sh, save_sm = (0, 0) if is_direct else (sh, sm)
-                save_eh, save_em = (0, 0) if is_direct else (eh, em)
+                # 直行直帰の場合、時間は保存しない
+                save_sh, save_sm = (0, 0) if time_disabled else (sh, sm)
+                save_eh, save_em = (0, 0) if time_disabled else (eh, em)
                 
                 new_data = {
-                    "date_str": input_date_str,
-                    "type": r_code,
-                    "start_h": save_sh, "start_m": save_sm,
-                    "end_h": save_eh, "end_m": save_em,
-                    "distance_km": dist_km,
-                    "pay_amount": 0, 
+                    "date_str": input_date_str, "type": r_code,
+                    "start_h": save_sh, "start_m": save_sm, "end_h": save_eh, "end_m": save_em,
+                    "distance_km": dist_km, "pay_amount": 0, 
                     "duration_minutes": (save_eh*60+save_em) - (save_sh*60+save_sm)
                 }
                 save_record_to_sheet(new_data)
@@ -407,7 +419,6 @@ with tab_input:
                         dist = int(float(r['distance_km']))
                         pay = calculate_direct_drive_pay(dist)
                         tag_cls, tag_txt = "tag-direct", "直行直帰"
-                        # 直行直帰は時間を表示しない
                         info_txt = f"<span style='color:#ffddaa; font-size:10px;'>{dist}km / ¥{pay:,}</span>"
                     elif r['type'] == "DRIVE":
                         dist = int(float(r['distance_km']))
