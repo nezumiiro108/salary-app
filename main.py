@@ -101,7 +101,6 @@ def get_min_record_date():
 
 def load_setting(key, default_value):
     try:
-        # 設定のキャッシュTTLを3600秒(60分)に延長
         df = conn.read(worksheet="settings", ttl=3600)
         if df.empty: return default_value
         row = df[df['key'] == key]
@@ -151,7 +150,6 @@ def calculate_daily_total(records, base_wage, drive_wage):
     
     for r in sorted_records:
         try:
-            # データ型の安全な変換
             sh, sm = int(float(r['start_h'])), int(float(r['start_m']))
             eh, em = int(float(r['end_h'])), int(float(r['end_m']))
             dist = Decimal(r['distance_km'])
@@ -198,7 +196,6 @@ def calculate_daily_total(records, base_wage, drive_wage):
         total_wage_points += base_rate * multiplier
         accumulated_work_minutes += 1
     
-    # 最終処理
     total_work_pay_dec = (total_wage_points / Decimal(60))
     final_work_pay = total_work_pay_dec.to_integral_value(rounding=ROUND_FLOOR)
     
@@ -212,6 +209,7 @@ def format_time_label(h, m):
     return f"{prefix}{disp_h:02}:{m:02}"
 
 # --- 5. セッション ---
+# ★セッション初期化
 if 'base_wage' not in st.session_state:
     try:
         loaded = load_setting('base_wage', '1190')
@@ -224,10 +222,18 @@ if 'wage_drive' not in st.session_state:
         st.session_state.wage_drive = int(float(loaded_d))
     except:
         st.session_state.wage_drive = 1050
+if 'closing_day' not in st.session_state: # ★締め日初期化
+    try:
+        loaded_c = load_setting('closing_day', '31')
+        st.session_state.closing_day = int(float(loaded_c))
+    except:
+        st.session_state.closing_day = 31
+
 
 today = datetime.date.today()
 if 'view_year' not in st.session_state: st.session_state.view_year = today.year
 if 'view_month' not in st.session_state: st.session_state.view_month = today.month
+
 
 def change_month(amount):
     m = st.session_state.view_month + amount
@@ -249,6 +255,31 @@ def get_calendar_summary(wage_w, wage_d):
         summary[d] = {'pay': pay, 'min': mins}
     return summary
 
+# ★ナビゲーションに必要な計算を独立した関数として定義
+def get_period_dates(view_year, view_month, closing_day):
+    Y, M, D = view_year, view_month, closing_day
+    
+    if D == 31:
+        e_date = datetime.date(Y, M, calendar.monthrange(Y, M)[1])
+        s_date = datetime.date(Y, M, 1)
+        range_label = f"{Y}年{M}月1日～{e_date.day}日 (カレンダー月)"
+    else:
+        D_eff = min(D, calendar.monthrange(Y, M)[1])
+        e_date = datetime.date(Y, M, D_eff)
+        
+        prev_M = M - 1
+        prev_Y = Y
+        if prev_M == 0: prev_M = 12; prev_Y = Y - 1
+            
+        s_day = D + 1
+        max_day_prev = calendar.monthrange(prev_Y, prev_M)[1]
+        s_day_eff = min(s_day, max_day_prev) 
+        
+        s_date = datetime.date(prev_Y, prev_M, s_day_eff)
+        range_label = f"{prev_Y}年{prev_M}月{s_date.day}日～{Y}年{M}月{e_date.day}日 ({D}日締め)"
+        
+    return s_date, e_date, range_label
+
 # --- 6. メイン表示 ---
 tab_input, tab_calendar, tab_setting = st.tabs(["日次入力", "カレンダー", "設定"])
 
@@ -258,15 +289,18 @@ tab_input, tab_calendar, tab_setting = st.tabs(["日次入力", "カレンダー
 with tab_setting:
     st.write("")
     st.subheader("設定")
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     new_wage = c1.number_input("基本時給 (円)", value=st.session_state.base_wage, step=10)
     new_drive_wage = c2.number_input("運転時給 (円)", value=st.session_state.wage_drive, step=10)
-    
+    new_closing_day = c3.number_input("締め日 (日)", value=st.session_state.closing_day, min_value=1, max_value=31, step=1, help="20日締めの場合は20を入力。月末締めの場合は31を入力。")
+
     if st.button("保存"):
         st.session_state.base_wage = new_wage
         st.session_state.wage_drive = new_drive_wage
+        st.session_state.closing_day = new_closing_day
         save_setting('base_wage', new_wage)
         save_setting('wage_drive', new_drive_wage)
+        save_setting('closing_day', new_closing_day)
         st.success("保存しました")
         st.rerun()
     
@@ -450,8 +484,8 @@ with tab_input:
 with tab_calendar:
     min_rec = get_min_record_date()
     min_lim = min_rec.replace(day=1)
-    curr_dt = datetime.date.today()
-    max_lim = curr_dt.replace(day=1)
+    current_dt = datetime.date.today()
+    max_lim = current_dt.replace(day=1)
     view_d = datetime.date(st.session_state.view_year, st.session_state.view_month, 1)
     
     can_go_prev = view_d > min_lim
@@ -462,6 +496,7 @@ with tab_calendar:
         if st.button("◀", use_container_width=True, disabled=not can_go_prev): 
             change_month(-1); st.rerun()
     with c2:
+        # ★修正箇所: 「締め」を削除
         st.markdown(f"<div style='text-align:center; font-weight:bold; padding-top:5px; color:#bbb;'>{st.session_state.view_year}年 {st.session_state.view_month}月</div>", unsafe_allow_html=True)
     with c3:
         if st.button("▶", use_container_width=True, disabled=not can_go_next): 
@@ -472,8 +507,8 @@ with tab_calendar:
     
     total_pay = 0
     total_min = 0
-    s_date = datetime.date(st.session_state.view_year, st.session_state.view_month, 1)
-    e_date = datetime.date(st.session_state.view_year, st.session_state.view_month, calendar.monthrange(st.session_state.view_year, st.session_state.view_month)[1])
+    s_date, e_date, range_label = get_period_dates(st.session_state.view_year, st.session_state.view_month, st.session_state.closing_day)
+    
     curr = s_date
     while curr <= e_date:
         d_str = curr.strftime("%Y-%m-%d")
@@ -484,7 +519,7 @@ with tab_calendar:
 
     st.markdown(f"""
     <div class="total-area">
-        <div class="total-sub">今月の支給予定額</div>
+        <div class="total-sub">計算期間: {range_label}</div>
         <div class="total-amount">¥ {total_pay:,}</div>
         <div class="total-sub" style="margin-top:5px;">総稼働: {total_min//60}時間{total_min%60}分</div>
     </div>
