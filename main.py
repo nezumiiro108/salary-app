@@ -12,6 +12,12 @@ getcontext().prec = 30
 # --- 1. ページ設定 ---
 st.set_page_config(page_title="給料帳", layout="centered")
 
+# --- 2. ユーティリティ ---
+# デバッグログの格納場所をセッションに移動
+if 'DEBUG_LOG_STORE' not in st.session_state:
+    st.session_state.DEBUG_LOG_STORE = {}
+if 'LAST_CALC_DATE' not in st.session_state:
+    st.session_state.LAST_CALC_DATE = ""
 # --- 2. デザイン ---
 st.markdown("""
     <style>
@@ -149,7 +155,6 @@ def calculate_daily_total(records, base_wage, drive_wage, date_str=""):
     sorted_records = sorted(records, key=lambda x: int(x['start_h']) * 60 + int(x['start_m']))
     
     for r in sorted_records:
-        # ★ データ読み込み時の厳密な型変換 (V31/V32修正)
         try:
             sh, sm = int(float(r['start_h'])), int(float(r['start_m']))
             eh, em = int(float(r['end_h'])), int(float(r['end_m']))
@@ -157,13 +162,9 @@ def calculate_daily_total(records, base_wage, drive_wage, date_str=""):
         except (ValueError, TypeError):
             continue
         
-        if r['type'] == 'OTHER':
-            fixed_pay += Decimal(r['pay_amount'])
-            continue
+        if r['type'] == 'OTHER': fixed_pay += Decimal(r['pay_amount']); continue
             
-        if r['type'] == 'DRIVE_DIRECT':
-            fixed_pay += Decimal(calculate_direct_drive_pay(dist))
-            continue
+        if r['type'] == 'DRIVE_DIRECT': fixed_pay += Decimal(calculate_direct_drive_pay(dist)); continue
             
         if r['type'] == 'DRIVE':
             fixed_pay += Decimal(calculate_driving_allowance(dist))
@@ -172,26 +173,22 @@ def calculate_daily_total(records, base_wage, drive_wage, date_str=""):
             activity = 'WORK'
         elif r['type'] == 'BREAK':
             activity = 'BREAK'
-        else:
-            continue
+        else: continue
             
         s_min = sh * 60 + sm
         e_min = eh * 60 + em
         for m in range(s_min, e_min):
-            if m < len(timeline):
-                timeline[m] = activity
+            if m < len(timeline): timeline[m] = activity
 
-    # 2. 積み上げ計算 (Decimalで実行)
     total_wage_points = Decimal(0)
     accumulated_work_minutes = 0
     
-    # デバッグログの初期化 (必要に応じて)
-    # debug_log_data = []
-
+    debug_log_data = [] # 新しいログリスト
+    last_multiplier = 0.0
+    
     for i in range(len(timeline)):
         act = timeline[i]
-        if act not in ['WORK', 'DRIVE']:
-            continue
+        if act not in ['WORK', 'DRIVE']: continue
             
         base_rate = drive_wage_dec if act == 'DRIVE' else base_wage_dec
         
@@ -204,11 +201,33 @@ def calculate_daily_total(records, base_wage, drive_wage, date_str=""):
         elif is_night or is_overtime:
             multiplier = Decimal('1.25')
             
-        # ポイント加算
+        # ★デバッグロギング: 状態が変化した瞬間と重要な境界線のみ記録
+        if (i == 0 or 
+            abs(float(multiplier) - last_multiplier) > 0.0001 or 
+            i == NIGHT_START or 
+            i == OVERTIME_THRESHOLD or
+            i == OVERTIME_THRESHOLD + 1):
+            
+            h_m = f"{i//60:02d}:{i%60:02d}"
+            
+            # 直前のログと時刻が同じであればスキップ（連続ログ防止）
+            if not debug_log_data or debug_log_data[-1]['Time'] != h_m:
+                 debug_log_data.append({
+                    'Time': h_m,
+                    'Act': act,
+                    'Work_Acc': accumulated_work_minutes,
+                    'Mult': float(multiplier),
+                    'Base_Rate': float(base_rate),
+                    'Total_Points': float(total_wage_points)
+                })
+            last_multiplier = float(multiplier)
+            
         total_wage_points += base_rate * multiplier
         accumulated_work_minutes += 1
     
-    # 3. 最終処理: 60で割り、Decimalの切り捨て関数で切り捨てる
+    # ログをセッションに保存
+    st.session_state.DEBUG_LOG_STORE[date_str] = debug_log_data 
+    
     total_work_pay_dec = (total_wage_points / Decimal(60))
     final_work_pay = total_work_pay_dec.to_integral_value(rounding=ROUND_FLOOR)
     
@@ -216,12 +235,7 @@ def calculate_daily_total(records, base_wage, drive_wage, date_str=""):
     
     return int(grand_total_dec), accumulated_work_minutes
 
-def format_time_label(h, m):
-    prefix = "翌" if h >= 24 else ""
-    disp_h = h - 24 if h >= 24 else h
-    return f"{prefix}{disp_h:02}:{m:02}"
-
-# --- 5. セッション ---
+# --- 5. セッション (初期化と設定ロード) ---
 if 'base_wage' not in st.session_state:
     try:
         loaded = load_setting('base_wage', '1190')
@@ -238,26 +252,6 @@ if 'wage_drive' not in st.session_state:
 today = datetime.date.today()
 if 'view_year' not in st.session_state: st.session_state.view_year = today.year
 if 'view_month' not in st.session_state: st.session_state.view_month = today.month
-
-def change_month(amount):
-    m = st.session_state.view_month + amount
-    y = st.session_state.view_year
-    if m > 12: m = 1; y += 1
-    elif m < 1: m = 12; y -= 1
-    st.session_state.view_month = m
-    st.session_state.view_year = y
-
-def get_calendar_summary(wage_w, wage_d):
-    df = get_all_records_df()
-    if df.empty: return {}
-    summary = {}
-    unique_dates = df['date_str'].unique()
-    for d in unique_dates:
-        day_df = df[df['date_str'] == d]
-        records = day_df.to_dict('records')
-        pay, mins = calculate_daily_total(records, wage_w, wage_d)
-        summary[d] = {'pay': pay, 'min': mins}
-    return summary
 
 # --- 6. メイン表示 ---
 tab_input, tab_calendar, tab_setting = st.tabs(["日次入力", "カレンダー", "設定"])
@@ -323,16 +317,12 @@ with tab_input:
             other_amount = st.number_input("金額 (円)", min_value=0, step=100)
         
         st.markdown("<div style='height:15px'></div>", unsafe_allow_html=True)
-        if st.button("その他を追加", type="primary", use_container_width=True):
+        if st.button("追加", type="primary", use_container_width=True):
             if other_amount <= 0:
                 st.error("金額を入力してください")
             else:
                 final_pay = other_amount if "支給" in other_kind else -other_amount
-                new_data = {
-                    "date_str": input_date_str, "type": "OTHER",
-                    "start_h": 0, "start_m": 0, "end_h": 0, "end_m": 0,
-                    "distance_km": 0, "pay_amount": final_pay, "duration_minutes": 0
-                }
+                new_data = {"date_str": input_date_str, "type": "OTHER", "start_h": 0, "start_m": 0, "end_h": 0, "end_m": 0, "distance_km": 0, "pay_amount": final_pay, "duration_minutes": 0}
                 save_record_to_sheet(new_data)
                 st.rerun()
 
@@ -396,10 +386,11 @@ with tab_input:
                 save_record_to_sheet(new_data)
                 st.rerun()
             
-    # === 登録済みリスト ===
+    # --- 履歴リストとデバッグ表示 ---
     st.markdown("<div style='font-size:12px; font-weight:bold; color:#888; margin-top:20px; margin-bottom:5px;'>登録済みリスト</div>", unsafe_allow_html=True)
     
     day_recs = get_records_by_date(input_date_str)
+    # ここで計算が実行され、ログがセッションに保存される
     day_pay, day_min = calculate_daily_total(day_recs, st.session_state.base_wage, st.session_state.wage_drive, date_str=input_date_str)
     
     if not day_recs:
@@ -452,6 +443,22 @@ with tab_input:
                 <div class="total-amount">計 ¥{day_pay:,}</div>
             </div>
         """, unsafe_allow_html=True)
+
+    # --- デバッグログ表示エリア ---
+    if input_date_str in st.session_state.debug_log:
+        df_log = pd.DataFrame(st.session_state.debug_log[input_date_str])
+        
+        with st.expander("▶️ 計算詳細ログ (ズレの原因究明用)", expanded=False):
+            final_points = df_log['Total_Points'].iloc[-1] if not df_log.empty else 0
+            
+            st.markdown(f"<b>最終ポイント合計:</b> {final_points:,.2f} / 60 = <b>¥{day_pay:,}</b>", unsafe_allow_html=True)
+            
+            st.dataframe(
+                df_log.drop(columns=['Total_Points'], errors='ignore'),
+                use_container_width=True,
+                height=300
+            )
+            st.caption("※Points_Acc: 時給換算での累積ポイント。最終値/60が給与です。")
 
 # ==========================================
 # TAB: カレンダー
@@ -508,15 +515,10 @@ with tab_calendar:
     month_days = cal_obj.monthdayscalendar(st.session_state.view_year, st.session_state.view_month)
     today_d = datetime.date.today()
 
-    # カレンダーHTML構築
-    cal_html_parts = []
-    cal_html_parts.append('<div class="calendar-grid">')
-    cal_html_parts.extend(html_parts) # ヘッダーを追加
-    
     for week in month_days:
         for day in week:
             if day == 0:
-                cal_html_parts.append('<div class="cal-day cal-empty"></div>')
+                html_parts.append('<div class="cal-day cal-empty"></div>')
             else:
                 curr_d = datetime.date(st.session_state.view_year, st.session_state.view_month, day)
                 d_str = curr_d.strftime("%Y-%m-%d")
@@ -526,7 +528,6 @@ with tab_calendar:
                 pay_disp = f"¥{pay_val:,}" if pay_val > 0 else ""
                 pay_div = f'<div class="cal-pay">{pay_disp}</div>' if pay_disp else ""
                 
-                cal_html_parts.append(f'<div class="cal-day {extra_cls}"><div class="cal-num">{day}</div>{pay_div}</div>')
+                html_parts.append(f'<div class="cal-day {extra_cls}"><div class="cal-num">{day}</div>{pay_div}</div>')
                 
-    cal_html_parts.append('</div>') 
-    st.markdown("".join(cal_html_parts), unsafe_allow_html=True)
+    st.markdown("".join(html_parts), unsafe_allow_html=True)
