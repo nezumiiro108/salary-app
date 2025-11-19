@@ -15,9 +15,11 @@ st.set_page_config(page_title="給料帳", layout="centered")
 # --- 2. デザイン ---
 st.markdown("""
     <style>
+    /* 全体の背景をダークに固定 */
     .stApp { background-color: #0e1117; color: #fafafa; }
     .block-container { padding-top: 2rem; padding-bottom: 5rem; max-width: 600px; }
     
+    /* カレンダー */
     .calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; margin-top: 5px; }
     .cal-header { text-align: center; font-size: 10px; font-weight: bold; color: #aaa; padding-bottom: 2px; }
     .cal-day { background-color: #262730; border: 1px solid #333; border-radius: 4px; height: 50px; display: flex; flex-direction: column; align-items: center; justify-content: center; }
@@ -170,12 +172,13 @@ def calculate_daily_total(records, base_wage, drive_wage, date_str=""):
         s_min = sh * 60 + sm
         e_min = eh * 60 + em
         for m in range(s_min, e_min):
-            if m < len(timeline): timeline[m] = activity
+            if m < len(timeline):
+                timeline[m] = activity
 
-    # 2. 積み上げ計算 (Decimalで実行)
     total_wage_points = Decimal(0)
     accumulated_work_minutes = 0
     
+    # デバッグログの初期化
     debug_log_data = [] 
     last_multiplier = 0.0
     
@@ -242,7 +245,6 @@ if 'wage_drive' not in st.session_state:
         st.session_state.wage_drive = 1050
 
 if 'DEBUG_LOG_STORE' not in st.session_state: st.session_state.DEBUG_LOG_STORE = {}
-if 'LAST_CALC_DATE' not in st.session_state: st.session_state.LAST_CALC_DATE = ""
 
 today = datetime.date.today()
 if 'view_year' not in st.session_state: st.session_state.view_year = today.year
@@ -264,7 +266,7 @@ def get_calendar_summary(wage_w, wage_d):
     for d in unique_dates:
         day_df = df[df['date_str'] == d]
         records = day_df.to_dict('records')
-        pay, mins = calculate_daily_total(records, wage_w, wage_d)
+        pay, mins = calculate_daily_total(records, wage_w, wage_d, date_str="") 
         summary[d] = {'pay': pay, 'min': mins}
     return summary
 
@@ -353,7 +355,7 @@ with tab_input:
             st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
             is_direct = st.toggle("直行直帰 (時給なし・25円/km)", value=False)
         
-        time_disabled = is_direct and is_drive
+        time_disabled = is_direct and is_drive # ★FIX
 
         sh, sm = time_sliders("開始", "sh_in", "sm_in", 9, 0, disabled=time_disabled)
         eh, em = time_sliders("終了", "eh_in", "em_in", 18, 0, disabled=time_disabled)
