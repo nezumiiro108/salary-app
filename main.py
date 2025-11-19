@@ -86,7 +86,7 @@ def get_records_by_date(date_str):
     df = get_all_records_df()
     if df.empty: return []
     filtered = df[df['date_str'] == date_str].copy()
-    return filtered.sort_values(by=['start_h', 'start_m']).to_dict('records')
+    return filtered.to_dict('records')
 
 def get_min_record_date():
     df = get_all_records_df()
@@ -136,7 +136,7 @@ def calculate_driving_allowance(km):
 def calculate_direct_drive_pay(km):
     return int(km) * 25
 
-def calculate_daily_total(records, base_wage, drive_wage):
+def calculate_daily_total(records, base_wage, drive_wage, date_str=""):
     
     base_wage_dec = Decimal(base_wage)
     drive_wage_dec = Decimal(drive_wage)
@@ -147,13 +147,12 @@ def calculate_daily_total(records, base_wage, drive_wage):
     sorted_records = sorted(records, key=lambda x: int(x['start_h']) * 60 + int(x['start_m']))
     
     for r in sorted_records:
-        # ★データ読み込み時の厳密な型変換 (エラーの原因となりやすい箇所の補強)
+        # ★ データ読み込み時の厳密な型変換
         try:
             sh, sm = int(float(r['start_h'])), int(float(r['start_m']))
             eh, em = int(float(r['end_h'])), int(float(r['end_m']))
             dist = Decimal(r['distance_km'])
         except (ValueError, TypeError):
-            # データが壊れていたらスキップ
             continue
         
         if r['type'] == 'OTHER':
@@ -184,15 +183,20 @@ def calculate_daily_total(records, base_wage, drive_wage):
     total_wage_points = Decimal(0)
     accumulated_work_minutes = 0
     
-    for m in range(len(timeline)):
-        act = timeline[m]
+    # デバッグログの初期化
+    debug_log_data = []
+    last_multiplier = 0.0
+    
+    for i in range(len(timeline)):
+        act = timeline[i]
+        
         if act not in ['WORK', 'DRIVE']:
             continue
             
         base_rate = drive_wage_dec if act == 'DRIVE' else base_wage_dec
         
         multiplier = Decimal(1)
-        is_night = (NIGHT_START <= m < NIGHT_END)
+        is_night = (NIGHT_START <= i < NIGHT_END)
         is_overtime = (accumulated_work_minutes >= OVERTIME_THRESHOLD)
         
         if is_night and is_overtime:
@@ -200,21 +204,38 @@ def calculate_daily_total(records, base_wage, drive_wage):
         elif is_night or is_overtime:
             multiplier = Decimal('1.25')
             
+        # ★デバッグロギング (状態変化時と境界線のみ)
+        if (i == 0 or 
+            abs(float(multiplier) - last_multiplier) > 0.0001 or 
+            i == NIGHT_START or 
+            i == OVERTIME_THRESHOLD or
+            i == OVERTIME_THRESHOLD + 1):
+            
+            h_m = f"{i//60:02d}:{i%60:02d}"
+            
+            # 直前のログと時刻が同じであればスキップ（連続ログ防止）
+            if not debug_log_data or debug_log_data[-1]['Time'] != h_m:
+                 debug_log_data.append({
+                    'Time': h_m,
+                    'Act': act,
+                    'Work_Acc': accumulated_work_minutes,
+                    'Mult': float(multiplier),
+                    'Base_Rate': float(base_rate),
+                    'Total_Points': float(total_wage_points)
+                })
+            last_multiplier = float(multiplier)
+            
         total_wage_points += base_rate * multiplier
         accumulated_work_minutes += 1
     
-    # 3. 最終処理: 60で割り、Decimalの切り捨て関数で切り捨てる
+    st.session_state.debug_log[date_str] = debug_log_data # ログをセッションに保存
+    
     total_work_pay_dec = (total_wage_points / Decimal(60))
     final_work_pay = total_work_pay_dec.to_integral_value(rounding=ROUND_FLOOR)
     
     grand_total_dec = final_work_pay + fixed_pay
     
     return int(grand_total_dec), accumulated_work_minutes
-
-def format_time_label(h, m):
-    prefix = "翌" if h >= 24 else ""
-    disp_h = h - 24 if h >= 24 else h
-    return f"{prefix}{disp_h:02}:{m:02}"
 
 # --- 5. セッション ---
 if 'base_wage' not in st.session_state:
@@ -229,6 +250,9 @@ if 'wage_drive' not in st.session_state:
         st.session_state.wage_drive = int(float(loaded_d))
     except:
         st.session_state.wage_drive = 1050
+
+if 'debug_log' not in st.session_state: st.session_state.debug_log = {}
+if 'SHOW_DEBUG' not in st.session_state: st.session_state.SHOW_DEBUG = False
 
 today = datetime.date.today()
 if 'view_year' not in st.session_state: st.session_state.view_year = today.year
@@ -250,7 +274,8 @@ def get_calendar_summary(wage_w, wage_d):
     for d in unique_dates:
         day_df = df[df['date_str'] == d]
         records = day_df.to_dict('records')
-        pay, mins = calculate_daily_total(records, wage_w, wage_d)
+        # デバッグモードではないので、ログは収集しない
+        pay, mins = calculate_daily_total(records, wage_w, wage_d, date_str="") 
         summary[d] = {'pay': pay, 'min': mins}
     return summary
 
@@ -329,6 +354,7 @@ with tab_input:
                     "distance_km": 0, "pay_amount": final_pay, "duration_minutes": 0
                 }
                 save_record_to_sheet(new_data)
+                st.session_state.SHOW_DEBUG = True # ログ表示をONに
                 st.rerun()
 
     else:
@@ -389,13 +415,38 @@ with tab_input:
                     "duration_minutes": (save_eh*60+save_em) - (save_sh*60+save_sm)
                 }
                 save_record_to_sheet(new_data)
+                st.session_state.SHOW_DEBUG = True # ログ表示をONに
                 st.rerun()
             
-    # === 登録済みリスト ===
-    st.markdown("<div style='font-size:12px; font-weight:bold; color:#888; margin-top:20px; margin-bottom:5px;'>登録済みリスト</div>", unsafe_allow_html=True)
+    # --- ログ表示のトリガーと実行 ---
+    if st.session_state.SHOW_DEBUG:
+        if input_date_str in st.session_state.debug_log:
+            with st.expander("▶️ 計算詳細ログ (ズレの原因究明用)"):
+                df_log = pd.DataFrame(st.session_state.debug_log[input_date_str])
+                
+                # ポイント合計をMarkdownで表示
+                final_points = df_log['Total_Points'].iloc[-1] if not df_log.empty else 0
+                final_pay = calculate_daily_total(day_recs, st.session_state.base_wage, st.session_state.wage_drive, date_str=input_date_str)[0]
+                
+                st.markdown(f"<b>最終ポイント合計:</b> {final_points:,.2f} / 60 = <b>¥{final_pay:,}</b>", unsafe_allow_html=True)
+                
+                # DataFrame表示
+                st.dataframe(
+                    df_log.drop(columns=['Total_Points'], errors='ignore'),
+                    use_container_width=True,
+                    height=300
+                )
+                st.caption("※Work_Acc: 実働の累積時間(分)。480分で残業開始。")
+                st.button("ログを隠す", key="hide_log", on_click=lambda: st.session_state.update(SHOW_DEBUG=False))
     
+    # 履歴取得と当日集計（デバッグモードONの場合も再計算）
     day_recs = get_records_by_date(input_date_str)
-    day_pay, day_min = calculate_daily_total(day_recs, st.session_state.base_wage, st.session_state.wage_drive)
+    # ここで計算が実行され、ログがセッションに保存される
+    day_pay, day_min = calculate_daily_total(day_recs, st.session_state.base_wage, st.session_state.wage_drive, date_str=input_date_str)
+
+
+    # ... (既存の履歴リストの描画) ...
+    st.markdown("<div style='font-size:12px; font-weight:bold; color:#888; margin-top:20px; margin-bottom:5px;'>登録済みリスト</div>", unsafe_allow_html=True)
     
     if not day_recs:
         st.caption("なし")
