@@ -3,10 +3,10 @@ import datetime
 import math
 import pandas as pd
 from streamlit_gsheets import GSheetsConnection
-from decimal import Decimal, ROUND_FLOOR, getcontext # ★ Decimalをインポート
+from decimal import Decimal, ROUND_FLOOR, getcontext
 import calendar
 
-# Decimalの計算精度を高く設定（金融計算の標準的な対策）
+# Decimalの計算精度を高く設定
 getcontext().prec = 30
 
 # --- 1. ページ設定 ---
@@ -15,7 +15,6 @@ st.set_page_config(page_title="給料帳", layout="centered")
 # --- 2. デザイン ---
 st.markdown("""
     <style>
-    /* 全体の背景をダークに固定 */
     .stApp { background-color: #0e1117; color: #fafafa; }
     .block-container { padding-top: 2rem; padding-bottom: 5rem; max-width: 600px; }
     
@@ -122,7 +121,7 @@ def save_setting(key, value):
         conn.update(worksheet="settings", data=df)
         st.cache_data.clear()
 
-# --- 4. 計算ロジック (精度保証版) ---
+# --- 4. 計算ロジック ---
 NIGHT_START = 22 * 60
 NIGHT_END = 27 * 60
 OVERTIME_THRESHOLD = 8 * 60
@@ -139,7 +138,6 @@ def calculate_direct_drive_pay(km):
 
 def calculate_daily_total(records, base_wage, drive_wage):
     
-    # ★Decimal型に変換
     base_wage_dec = Decimal(base_wage)
     drive_wage_dec = Decimal(drive_wage)
     
@@ -149,15 +147,19 @@ def calculate_daily_total(records, base_wage, drive_wage):
     sorted_records = sorted(records, key=lambda x: int(x['start_h']) * 60 + int(x['start_m']))
     
     for r in sorted_records:
-        sh, sm = int(r['start_h']), int(r['start_m'])
-        eh, em = int(r['end_h']), int(r['end_m'])
+        # ★データ読み込み時の厳密な型変換 (エラーの原因となりやすい箇所の補強)
+        try:
+            sh, sm = int(float(r['start_h'])), int(float(r['start_m']))
+            eh, em = int(float(r['end_h'])), int(float(r['end_m']))
+            dist = Decimal(r['distance_km'])
+        except (ValueError, TypeError):
+            # データが壊れていたらスキップ
+            continue
         
         if r['type'] == 'OTHER':
             fixed_pay += Decimal(r['pay_amount'])
             continue
             
-        dist = Decimal(r['distance_km'])
-        
         if r['type'] == 'DRIVE_DIRECT':
             fixed_pay += Decimal(calculate_direct_drive_pay(dist))
             continue
@@ -178,7 +180,7 @@ def calculate_daily_total(records, base_wage, drive_wage):
             if m < len(timeline):
                 timeline[m] = activity
 
-    # 2. 積み上げ計算
+    # 2. 積み上げ計算 (Decimalで実行)
     total_wage_points = Decimal(0)
     accumulated_work_minutes = 0
     
@@ -194,19 +196,17 @@ def calculate_daily_total(records, base_wage, drive_wage):
         is_overtime = (accumulated_work_minutes >= OVERTIME_THRESHOLD)
         
         if is_night and is_overtime:
-            multiplier = Decimal('1.5625') # 1.25 * 1.25
+            multiplier = Decimal('1.5625') 
         elif is_night or is_overtime:
             multiplier = Decimal('1.25')
             
-        # ★計算ロジックの改善: 時給 * 倍率をポイントとして積み上げる
         total_wage_points += base_rate * multiplier
         accumulated_work_minutes += 1
     
-    # 3. 最後にまとめて60で割り、Decimalの切り捨て関数で切り捨て
+    # 3. 最終処理: 60で割り、Decimalの切り捨て関数で切り捨てる
     total_work_pay_dec = (total_wage_points / Decimal(60))
     final_work_pay = total_work_pay_dec.to_integral_value(rounding=ROUND_FLOOR)
     
-    # 最終合計をintで返す
     grand_total_dec = final_work_pay + fixed_pay
     
     return int(grand_total_dec), accumulated_work_minutes
