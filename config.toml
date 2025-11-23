@@ -1,0 +1,10 @@
+[client]
+toolbarMode = "viewer"       # 開発者メニューを最小限にする
+showErrorDetails = false     # エラー時にコードを表示しない
+
+[ui]
+hideTopBar = true            # 上部のバー（RunningやDeployボタン）を隠す
+
+[server]
+runOnSave = true             # 保存時に自動実行（開発用だが念のため）
+fileWatcherType = "none"     # ファイル監視の表示を抑制
